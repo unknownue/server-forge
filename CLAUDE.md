@@ -47,9 +47,13 @@ server-forge/
 ├── benchmark/                       # Performance tests
 │   ├── gpu/
 │   │   ├── gpu-burn.sh
-│   │   ├── mlperf-inference.sh      #   MLPerf Inference one-shot test
 │   │   ├── nccl-test.sh
 │   │   └── p2p-bandwidth.sh
+│   ├── llm/                         #   LLM inference benchmark (vLLM + AIPerf)
+│   │   ├── download-model.sh        #     Download model from HuggingFace
+│   │   ├── serve-vllm.sh            #     Start vLLM OpenAI-compatible server
+│   │   ├── bench-aiperf.sh          #     Run AIPerf against any endpoint
+│   │   └── run-all.sh               #     Full pipeline: download → serve → bench
 │   ├── storage/fio-bench.sh
 │   ├── network/iperf3-test.sh
 │   └── results/                     #   Benchmark output (not tracked)
@@ -58,6 +62,36 @@ server-forge/
 │
 └── (no shared docs — all documentation is per-node)
 ```
+
+## LLM Model Management
+
+Models are stored under `/data/work/models/<org>/<model_name>/` to enable cross-benchmark
+reuse. Each model directory contains:
+
+- `.model_id` — HuggingFace model identifier (e.g. `Qwen/Qwen3.6-27B`)
+- `.revision` — Git revision pinned at download time
+- `.downloaded_at` — ISO 8601 timestamp of download
+
+Models are never committed to the repository but are reproducible via
+`bash benchmark/llm/download-model.sh [MODEL_ID]`.
+
+## Docker Container File Ownership
+
+When Docker containers write to host-mounted directories (`-v /host/path:/container/path`),
+files created inside the container are owned by the container's user (typically root).
+This causes "Permission denied" errors for subsequent host-side operations.
+
+**Rule**: Always include `--user $(id -u):$(id -g)` in `docker run` commands when the
+container writes to host-mounted paths. This ensures created files are owned by the
+host user, not root.
+
+When the container needs to resolve the host UID (e.g. PyTorch inductor cache), also
+mount the host's user database:
+
+    -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro
+
+For containers that require root for internal setup but write output to mounts,
+prefer two-stage: run setup as root, then switch user for the actual workload.
 
 ## Known Pitfalls & Fixes
 Troubleshooting is documented per-node in `nodes/<hostname>/README.md`.

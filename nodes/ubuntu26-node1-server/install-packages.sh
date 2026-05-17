@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install apt packages for this node.
+# Install packages for this node.
 # Append new dependencies as needed. Run as:
 #   sudo bash nodes/ubuntu26-node1-server/install-packages.sh
 
@@ -9,11 +9,11 @@ echo "Updating package index..."
 apt update
 
 echo ""
-echo "Installing packages..."
+echo "Installing apt packages..."
 
 apt install -y \
-    git
+    git \
+    python3-huggingface-hub
 
 echo ""
-echo "Done. Installed packages:"
-dpkg -l git 2>/dev/null | tail -1
+echo "Done."

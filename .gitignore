@@ -1,0 +1,6 @@
+
+tmp/
+.vscode/settings.json
+nvidia-ctk-debs/
+
+results/

@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "deny": [
+      "sudo *",
+      "apt *",
+      "apt-get *",
+      "dpkg *",
+      "snap *",
+      "systemctl *",
+      "update-grub *",
+      "update-initramfs *",
+      "grub-install *",
+      "modprobe *",
+      "rmmod *",
+      "reboot *",
+      "shutdown *",
+      "poweroff *",
+      "mount *",
+      "umount *",
+      "mkfs *",
+      "fdisk *",
+      "parted *",
+      "wpa_passphrase *",
+      "wpa_supplicant *",
+      "dhcpcd *",
+      "tee /etc/*",
+      "tee /boot/*",
+      "tee /usr/*",
+      "cp /etc/*",
+      "cp /boot/*",
+      "mv /etc/*",
+      "rm /etc/*",
+      "rm /boot/*"
+    ],
+    "allow": [
+      "bash /home/unknownue/Development/server-forge/scripts/lib/hardware-info.sh",
+      "source /home/unknownue/Development/server-forge/scripts/lib/discover.sh",
+      "bash /home/unknownue/Development/server-forge/benchmark/*"
+    ]
+  }
+}

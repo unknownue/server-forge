@@ -1,0 +1,68 @@
+=== CPU ===
+Architecture:                            x86_64
+CPU(s):                                  48
+On-line CPU(s) list:                     0-47
+Model name:                              Intel(R) Xeon(R) w7-3545
+Thread(s) per core:                      2
+Core(s) per socket:                      24
+Socket(s):                               1
+CPU(s) scaling MHz:                      24%
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-47
+
+=== RAM ===
+               total        used        free      shared  buff/cache   available
+Mem:           247Gi       4.7Gi       242Gi        59Mi       1.4Gi       242Gi
+Swap:          8.0Gi          0B       8.0Gi
+
+=== DIMM Slots ===
+dmidecode memory info not available (may need root).
+
+=== Motherboard ===
+sys_vendor:          Gigabyte Technology Co., Ltd.
+product_name:        W790AITOP
+product_version:     -CF
+board_vendor:        Gigabyte Technology Co., Ltd.
+board_name:          W790 AI TOP
+board_version:       Default string
+bios_version:        F9a
+bios_date:           12/03/2025
+
+=== GPU Devices (lspci) ===
+16:00.0 3D controller [0302]: NVIDIA Corporation GB202GL [RTX 6000D] [10de:2bb9] (rev a1)
+34:00.0 3D controller [0302]: NVIDIA Corporation GB202GL [RTX 6000D] [10de:2bb9] (rev a1)
+52:00.0 VGA compatible controller [0300]: NVIDIA Corporation GP108 [GeForce GT 1030] [10de:1d01] (rev a1)
+8e:00.0 3D controller [0302]: NVIDIA Corporation GB202GL [RTX 6000D] [10de:2bb9] (rev a1)
+ca:00.0 3D controller [0302]: NVIDIA Corporation GB202GL [RTX 6000D] [10de:2bb9] (rev a1)
+
+=== NVIDIA GPU Details ===
+index, name, pci.bus_id, driver_version, memory.total [MiB]
+0, NVIDIA RTX 6000D, 00000000:16:00.0, 595.58.03, 85651 MiB
+1, NVIDIA RTX 6000D, 00000000:34:00.0, 595.58.03, 85651 MiB
+2, NVIDIA RTX 6000D, 00000000:8E:00.0, 595.58.03, 85651 MiB
+3, NVIDIA RTX 6000D, 00000000:CA:00.0, 595.58.03, 85651 MiB
+
+=== Storage (lsblk) ===
+NAME                        SIZE TYPE MOUNTPOINT                   FSTYPE
+loop0                         4K loop /snap/bare/5                 squashfs
+loop1                      66.8M loop /snap/core24/1643            squashfs
+loop2                     246.6M loop /snap/firefox/8306           squashfs
+loop3                     606.1M loop /snap/gnome-46-2404/153      squashfs
+loop4                      91.7M loop /snap/gtk-common-themes/1535 squashfs
+loop5                       395M loop /snap/mesa-2404/1165         squashfs
+loop6                      49.3M loop /snap/snapd/26865            squashfs
+nvme0n1                     1.8T disk                              
+├─nvme0n1p1                   1G part /boot/efi                    vfat
+├─nvme0n1p2                   2G part /boot                        ext4
+└─nvme0n1p3                 1.8T part                              LVM2_member
+  └─ubuntu--vg-ubuntu--lv   200G lvm  /                            ext4
+
+=== LVM Volumes ===
+No LVM volumes.
+
+=== OS ===
+NAME="Ubuntu"
+VERSION="26.04 (Resolute Raccoon)"
+
+=== Kernel ===
+Linux ubuntu26-node1-server 7.0.0-15-generic #15-Ubuntu SMP PREEMPT_DYNAMIC Wed Apr 22 16:06:43 UTC 2026 x86_64 GNU/Linux

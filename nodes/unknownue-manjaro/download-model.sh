@@ -1,7 +1,7 @@
 #!/bin/bash
 # Thin wrapper — delegates to the shared download script.
 # Usage:
-#   bash nodes/ubuntu26-node1-server/download-model.sh [MODEL_ID] [REV] [FORMAT]
+#   bash nodes/unknownue-manjaro/download-model.sh [MODEL_ID] [REV] [FORMAT]
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"

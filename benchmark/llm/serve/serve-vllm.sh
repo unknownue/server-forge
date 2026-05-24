@@ -7,7 +7,7 @@
 # Default: Qwen/Qwen3-27B, GPU 0,1 (TP=2), port 8000
 #
 # The server runs in the foreground. Press Ctrl+C to stop.
-# Model must be downloaded first: bash nodes/ubuntu26-node1-server/download-model.sh
+# Model must be downloaded first: bash scripts/lib/download-model.sh
 
 set -euo pipefail
 
@@ -21,7 +21,7 @@ MODEL_DIR="/data/work/models/$ORG/$MODEL_NAME"
 
 if [[ ! -d "$MODEL_DIR" ]]; then
     echo "ERROR: Model not found at $MODEL_DIR" >&2
-    echo "Run first: bash nodes/ubuntu26-node1-server/download-model.sh" >&2
+    echo "Run first: bash scripts/lib/download-model.sh" >&2
     exit 1
 fi
 

@@ -9,7 +9,7 @@
 # BACKEND: sglang (default, Blackwell-compatible) or vllm
 #
 # Steps are run separately so each can be re-run independently:
-#   1. nodes/ubuntu26-node1-server/download-model.sh  — download model once
+#   1. scripts/lib/download-model.sh                   — download model once
 #   2. benchmark/llm/serve/serve-sglang.sh            — start server (background)
 #   3. benchmark/llm/bench/bench-aiperf.sh            — run benchmark
 #
@@ -60,7 +60,7 @@ echo ""
 
 # ── Step 1: Download model ──
 echo "[1/3] Ensuring model is downloaded..."
-bash "$REPO_ROOT/nodes/ubuntu26-node1-server/download-model.sh" "$MODEL_ID"
+bash "$REPO_ROOT/scripts/lib/download-model.sh" "$MODEL_ID"
 echo ""
 
 # ── Step 2: Start server ──

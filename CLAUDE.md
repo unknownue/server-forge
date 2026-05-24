@@ -32,10 +32,11 @@ server-forge/
 │
 ├── nodes/                           # Per-machine config (one dir per hostname)
 │   └── <hostname>/                  #   hardware-info.txt, README.md
-│       ├── download-model.sh        #     Download LLM models from HuggingFace
+│       ├── download-model.sh        #     Thin wrapper → scripts/lib/download-model.sh
 │       ├── pull-images.sh           #     Pull LLM benchmark Docker images
 │       ├── provision/               #     OS provisioning scripts (one-shot, root)
 │       ├── config/                  #     Post-provisioning configuration
+│       │   └── models.conf          #       Per-node LLM model registry
 │       └── unsloth/                 #     Custom Unsloth Studio Docker image
 │                                   #   Copy an existing similar node to create a new one
 │
@@ -47,7 +48,8 @@ server-forge/
 │   └── lib/                         #   Shared library (source these, don't execute)
 │       ├── discover.sh              #   ★ Machine discovery (run first on any node)
 │       ├── utils.sh                 #   Logging, error handling, helpers
-│       └── hardware-info.sh         #   Generic hardware info collector
+│       ├── hardware-info.sh         #   Generic hardware info collector
+│       └── download-model.sh        #   ★ LLM model download (node-agnostic)
 │
 ├── benchmark/                       # Performance tests
 │   ├── llm/
@@ -92,7 +94,7 @@ When a model's revision changes, the directory is cleaned before re-downloading
 to prevent stale file accumulation.
 
 Models are never committed to the repository but are reproducible via
-`bash nodes/ubuntu26-node1-server/download-model.sh [MODEL_ID] [REV] [FORMAT]`.
+`bash scripts/lib/download-model.sh [MODEL_ID] [REV] [FORMAT]`.
 
 ## Docker Container File Ownership
 

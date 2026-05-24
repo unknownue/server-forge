@@ -42,4 +42,6 @@ Results are saved to `tmp/benchmark-results/`.
 
 ## Model Management
 
-Models are downloaded with [nodes/ubuntu26-node1-server/download-model.sh](../nodes/ubuntu26-node1-server/download-model.sh) to `/data/work/models/<org>/<model_name>/`, pinned by revision. The format field controls which files are downloaded (`safetensors` default, `gguf`, or `full`).
+Models are downloaded with [scripts/lib/download-model.sh](../scripts/lib/download-model.sh) to `/data/work/models/<org>/<model_name>/`, pinned by revision. The format field controls which files are downloaded (`safetensors` default, `gguf`, or `full`).
+
+Each node registers its own models in `nodes/<hostname>/config/models.conf`.

@@ -1,0 +1,64 @@
+=== CPU ===
+Architecture:                            x86_64
+CPU(s):                                  16
+On-line CPU(s) list:                     0-15
+Model name:                              AMD Ryzen 7 3800X 8-Core Processor
+Thread(s) per core:                      2
+Core(s) per socket:                      8
+Socket(s):                               1
+CPU(s) scaling MHz:                      74%
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-15
+
+=== RAM ===
+               total        used        free      shared  buff/cache   available
+Mem:            31Gi        14Gi        10Gi        76Mi       5.6Gi        16Gi
+Swap:             0B          0B          0B
+
+=== DIMM Slots ===
+dmidecode memory info not available (may need root).
+
+=== Motherboard ===
+sys_vendor:          Micro-Star International Co., Ltd.
+product_name:        MS-7C37
+product_version:     3.0
+board_vendor:        Micro-Star International Co., Ltd.
+board_name:          X570-A PRO (MS-7C37)
+board_version:       3.0
+bios_version:        H.60
+bios_date:           11/06/2019
+
+=== GPU Devices (lspci) ===
+2d:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD102 [GeForce RTX 4090] [10de:2684] (rev a1)
+
+=== NVIDIA GPU Details ===
+index, name, pci.bus_id, driver_version, memory.total [MiB]
+0, NVIDIA GeForce RTX 4090, 00000000:2D:00.0, 590.48.01, 24564 MiB
+
+=== Storage (lsblk) ===
+NAME          SIZE TYPE MOUNTPOINT FSTYPE
+sda         931.5G disk
+├─sda1        487M part            vfat
+├─sda2        200G part            ntfs
+├─sda3        400G part            ntfs
+└─sda4        331G part            ntfs
+sdb         232.9G disk
+sdc         232.9G disk
+├─sdc1         16M part
+├─sdc2      232.2G part            ntfs
+└─sdc3        735M part            ntfs
+nvme1n1     953.9G disk
+├─nvme1n1p1    16M part
+└─nvme1n1p2 953.9G part            ntfs
+nvme0n1     476.9G disk
+├─nvme0n1p1   300M part /boot/efi  vfat
+└─nvme0n1p2 476.6G part /          xfs
+
+=== LVM Volumes ===
+No LVM volumes.
+
+=== OS ===
+NAME="Manjaro Linux"
+
+=== Kernel ===
+Linux unknownue-manjaro 6.12.77-1-MANJARO #1 SMP PREEMPT_DYNAMIC Fri, 13 Mar 2026 18:47:31 +0000 x86_64 GNU/Linux

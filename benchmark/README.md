@@ -1,97 +1,45 @@
 # Benchmark Suite
 
-Performance and stability tests for AI training servers.
+LLM inference performance tests for AI training servers.
 
 ## Quick Start
 
 ```bash
-# AI inference performance (recommended first test)
-bash benchmark/gpu/download-mlperf-assets.sh bert
-bash benchmark/gpu/mlperf-inference.sh bert Offline 0,1,2,3
+# Full pipeline: download model, start server, run benchmark
+bash benchmark/llm/bench/run-all.sh [MODEL_ID] [GPUS] [BACKEND]
 
-# GPU stress / interconnect
-bash benchmark/gpu/gpu-burn.sh 600
-bash benchmark/gpu/p2p-bandwidth.sh
-
-# Storage
-bash benchmark/storage/fio-bench.sh /data/fio-test 10G
-
-# Network (server on one node, client on another)
-bash benchmark/network/iperf3-test.sh server              # node A
-bash benchmark/network/iperf3-test.sh client 10.0.0.101   # node B
+# Or run each step individually:
+bash benchmark/llm/serve/serve-sglang.sh [MODEL_ID] [GPUS] [PORT]   # start SGLang server
+bash benchmark/llm/serve/serve-vllm.sh [MODEL_ID] [GPUS] [PORT]    # start vLLM server
+bash benchmark/llm/serve/serve-unsloth.sh                           # start Unsloth Studio
+bash benchmark/llm/bench/bench-aiperf.sh [BASE_URL] [MODEL] [HF_ID] # run benchmark
 ```
 
-## GPU Benchmarks
+## LLM Inference Benchmark
 
-### `mlperf-inference.sh` — MLPerf Inference
+End-to-end pipeline: download model → start inference server → run AIPerf benchmark.
 
-Industry-standard AI inference benchmark. Requires model download first.
+### `serve/` — Inference Servers
 
-| Script | Purpose | When to use |
-|--------|---------|-------------|
-| `download-mlperf-assets.sh` | Download models & datasets to `/data/work/mlperf/` | Run once per benchmark |
-| `mlperf-inference.sh` | Build TensorRT engines + run inference | Repeated testing |
+| Script | Backend | Notes |
+|--------|---------|-------|
+| [serve-sglang.sh](llm/serve/serve-sglang.sh) | SGLang | Blackwell-compatible (default), FP8/NVFP4 optimized |
+| [serve-vllm.sh](llm/serve/serve-vllm.sh) | vLLM | General-purpose OpenAI-compatible server |
+| [serve-unsloth.sh](llm/serve/serve-unsloth.sh) | Unsloth Studio | Custom image (built from `nodes/.../unsloth/Dockerfile`) |
 
-```
-Usage:
-  download-mlperf-assets.sh [BENCHMARK]
-  mlperf-inference.sh [BENCHMARK] [SCENARIO] [GPUS]
+All servers expose an OpenAI-compatible API at `http://localhost:8000`.
 
-Benchmarks:  bert  ·  resnet50  ·  dlrm  ·  rnnt  ·  ssd-mobilenet  ·  retinanet  ·  3d-unet
-Scenarios:   Offline  ·  Server  ·  SingleStream
-Defaults:    bert Offline 0
-```
+### `bench/` — Benchmark Tools
 
-| Benchmark | Domain | Model size | Dataset | Typical throughput (RTX 6000D) |
-|-----------|--------|------------|---------|------|
-| `bert` | NLP (BERT-Large) | ~1.3GB | SQuAD v1.1 | ~3000 QPS |
-| `resnet50` | Vision (ResNet-50) | ~100MB | ImageNet | ~10000 QPS |
-| `dlrm` | Recommendation | ~4GB | Criteo 1TB | ~2M QPS |
-| `rnnt` | Speech (RNN-T) | ~600MB | LibriSpeech | ~20000 QPS |
+| Script | Purpose |
+|--------|---------|
+| [run-all.sh](llm/bench/run-all.sh) | Full pipeline orchestrator (download → serve → bench) |
+| [bench-aiperf.sh](llm/bench/bench-aiperf.sh) | Run AIPerf against any OpenAI-compatible endpoint |
+| [build-aiperf.sh](llm/bench/build-aiperf.sh) | Build the AIPerf Docker image from submodule |
+| [test-sglang.sh](llm/bench/test-sglang.sh) | Quick smoke test for SGLang server |
 
-Assets are cached under `/data/work/mlperf/` across runs. Results are saved to `benchmark/results/`.
+Results are saved to `tmp/benchmark-results/`.
 
-### `gpu-burn.sh` — GPU Stress Test
+## Model Management
 
-Sustained compute load to validate thermal/power stability.
-
-```
-Usage: gpu-burn.sh [DURATION_SECONDS]   (default: 300)
-```
-
-### `p2p-bandwidth.sh` — GPU Interconnect Topology
-
-Shows NVLink / PCIe bandwidth between GPU pairs. Read-only, no GPU load.
-
-### `nccl-test.sh` — NCCL Multi-GPU Communication
-
-Tests all-reduce bandwidth across GPUs using PyTorch+NCCL in Docker.
-
-## Network Benchmarks
-
-### `iperf3-test.sh`
-
-Point-to-point network bandwidth between nodes.
-
-```
-Usage:
-  iperf3-test.sh server                # Run on server node
-  iperf3-test.sh client <SERVER_IP>    # Run on client node
-```
-
-## Storage Benchmarks
-
-### `fio-bench.sh`
-
-Sequential read/write I/O throughput on a given directory.
-
-```
-Usage: fio-bench.sh [TEST_DIR] [TEST_SIZE]
-Defaults: /data/fio-test 10G
-```
-
-## Adding a New Benchmark
-
-1. Place the script under the relevant subdirectory (`gpu/`, `network/`, `storage/`)
-2. Follow the existing conventions: `set -euo pipefail`, source `scripts/lib/utils.sh`
-3. Add it to this README
+Models are downloaded with [nodes/ubuntu26-node1-server/download-model.sh](../nodes/ubuntu26-node1-server/download-model.sh) to `/data/work/models/<org>/<model_name>/`, pinned by revision. The format field controls which files are downloaded (`safetensors` default, `gguf`, or `full`).

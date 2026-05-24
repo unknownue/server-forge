@@ -1,56 +1,66 @@
 #!/bin/bash
 # Run AIPerf benchmark against an OpenAI-compatible API endpoint.
-# Runs aiperf in Docker (build first: bash benchmark/llm/build-aiperf.sh)
+# Runs aiperf in Docker (build first: bash benchmark/llm/bench/build-aiperf.sh)
 #
 # Usage:
-#   bash benchmark/llm/bench-aiperf.sh [ENDPOINT] [MODEL_NAME]
+#   bash benchmark/llm/bench/bench-aiperf.sh [BASE_URL] [MODEL_NAME] [HF_MODEL_ID]
 #
-# Default: endpoint=http://localhost:8000/v1, model from serve-vllm.sh
+# MODEL_NAME is the server-side model name (passed to vLLM).
+# HF_MODEL_ID is the full HuggingFace ID for tokenizer download (e.g. Qwen/Qwen3.6-27B).
+#
+# Default: endpoint=http://localhost:8000, model=Qwen3.6-27B
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
-ENDPOINT="${1:-http://localhost:8000/v1}"
+BASE_URL="${1:-http://localhost:8000}"
 MODEL_NAME="${2:-Qwen3.6-27B}"
+HF_MODEL_ID="${3:-Qwen/$MODEL_NAME}"
 NUM_PROMPTS="${NUM_PROMPTS:-100}"
-MAX_CONCURRENCY="${MAX_CONCURRENCY:-32}"
+CONCURRENCY="${AIPERF_CONCURRENCY:-16}"
 
 AIPERF_IMAGE="aiperf:latest"
 
 # Ensure image is built
 if ! docker image inspect "$AIPERF_IMAGE" &>/dev/null; then
     echo "ERROR: Docker image '$AIPERF_IMAGE' not found." >&2
-    echo "Run: bash benchmark/llm/build-aiperf.sh" >&2
+    echo "Run: bash benchmark/llm/bench/build-aiperf.sh" >&2
     exit 1
 fi
 
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-RESULT_DIR="$REPO_ROOT/benchmark/results"
+RESULT_DIR="$REPO_ROOT/tmp/benchmark-results"
 mkdir -p "$RESULT_DIR"
 RESULT_FILE="$RESULT_DIR/aiperf_${MODEL_NAME}_${TIMESTAMP}.log"
 
 echo "=== AIPerf Benchmark ==="
-echo "  Endpoint      : $ENDPOINT"
+echo "  Endpoint      : $BASE_URL"
 echo "  Model         : $MODEL_NAME"
+echo "  Tokenizer     : $HF_MODEL_ID"
 echo "  Num Prompts   : $NUM_PROMPTS"
-echo "  Concurrency   : $MAX_CONCURRENCY"
+echo "  Concurrency   : $CONCURRENCY"
 echo "  Result File   : $RESULT_FILE"
 echo ""
+
+HF_MIRROR="${HF_ENDPOINT:-https://hf-mirror.com}"
 
 docker run --rm \
     --network host \
     --user "$(id -u):$(id -g)" \
     -e "HOME=/tmp" \
+    -e "HF_ENDPOINT=$HF_MIRROR" \
     -v /etc/passwd:/etc/passwd:ro \
     -v /etc/group:/etc/group:ro \
     -v "$RESULT_DIR:/results" \
     "$AIPERF_IMAGE" \
     bash -c "aiperf profile \
-        --endpoint '$ENDPOINT' \
+        --url '$BASE_URL' \
         --model '$MODEL_NAME' \
+        --tokenizer '$HF_MODEL_ID' \
         --num-prompts '$NUM_PROMPTS' \
-        --max-concurrency '$MAX_CONCURRENCY'" \
+        --concurrency '$CONCURRENCY' \
+        --artifact-dir /results" \
     2>&1 | tee "$RESULT_FILE"
 
 echo ""

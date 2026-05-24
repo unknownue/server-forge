@@ -2,7 +2,7 @@
 # Build AIPerf Docker image from local submodule.
 #
 # Usage:
-#   bash benchmark/llm/build-aiperf.sh
+#   bash benchmark/llm/bench/build-aiperf.sh
 #
 # Uses the env-builder stage (python:3.13-slim-bookworm, public image)
 # which contains a complete aiperf installation. The NGC distroless-based
@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 AIPERF_DIR="$REPO_ROOT/submodules/aiperf"
 DOCKERFILE="$AIPERF_DIR/Dockerfile"
 IMAGE_NAME="aiperf:latest"

@@ -13,7 +13,11 @@ echo "Installing apt packages..."
 
 apt install -y \
     git \
-    python3-huggingface-hub
+    python3-huggingface-hub \
+    pipx
+
+pipx ensurepath  # make sure ~/.local/bin in PATH, then reboot terminal
+pipx install py-spy
 
 echo ""
 echo "Done."

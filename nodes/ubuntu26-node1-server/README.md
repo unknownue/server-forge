@@ -22,7 +22,7 @@ Full hardware report: [hardware-info.txt](hardware-info.txt)
 All content on unallocated space is **ephemeral and reproducible** — it can be
 rebuilt by re-running the configuration code maintained in this project.
 
-First, allocate the space: `sudo bash nodes/ubuntu26-node1-server/allocate-storage.sh`
+First, allocate the space: `sudo bash nodes/ubuntu26-node1-server/provision/allocate-storage.sh`
 
 | LV | Mount point | Size | Content |
 |:---|:---|:---|:---|
@@ -87,13 +87,13 @@ rm ChangeMirrors.sh
 
 ### 4. System Packages
 ```bash
-sudo bash nodes/ubuntu26-node1-server/install-packages.sh
+sudo bash nodes/ubuntu26-node1-server/provision/install-packages.sh
 # Currently installs: git
 # Append new dependencies to install-packages.sh as needed.
 ```
 
 ```bash
-bash nodes/ubuntu26-node1-server/set-git-config.sh "unknownue" "unknownue@outlook.com"
+bash nodes/ubuntu26-node1-server/config/set-git-config.sh "unknownue" "unknownue@outlook.com"
 ```
 
 ### 5. GPU Driver
@@ -104,15 +104,15 @@ sudo ubuntu-drivers install nvidia-driver-595-server-open
 
 ### 6. Docker
 ```bash
-sudo bash nodes/ubuntu26-node1-server/install-docker.sh [registry-mirror]
-# e.g. sudo bash nodes/ubuntu26-node1-server/install-docker.sh registry.cn-hangzhou.aliyuncs.com
+sudo bash nodes/ubuntu26-node1-server/provision/install-docker.sh [registry-mirror]
+# e.g. sudo bash nodes/ubuntu26-node1-server/provision/install-docker.sh registry.cn-hangzhou.aliyuncs.com
 # Configures data-root=/data/docker, optional registry-mirrors.
 ```
 
 ### 7. NVIDIA Container Toolkit
 ```bash
-bash nodes/ubuntu26-node1-server/download-nvidia-ctk-debs.sh
-sudo bash nodes/ubuntu26-node1-server/install-nvidia-ctk.sh
+bash nodes/ubuntu26-node1-server/provision/download-nvidia-ctk-debs.sh
+sudo bash nodes/ubuntu26-node1-server/provision/install-nvidia-ctk.sh
 ```
 
 ### 8. Desktop Environment

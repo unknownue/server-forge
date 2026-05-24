@@ -2,12 +2,12 @@
 # Start vLLM inference server with OpenAI-compatible API.
 #
 # Usage:
-#   bash benchmark/llm/serve-vllm.sh [MODEL_ID] [GPUS] [PORT]
+#   bash benchmark/llm/serve/serve-vllm.sh [MODEL_ID] [GPUS] [PORT]
 #
 # Default: Qwen/Qwen3-27B, GPU 0,1 (TP=2), port 8000
 #
 # The server runs in the foreground. Press Ctrl+C to stop.
-# Model must be downloaded first: bash benchmark/llm/download-model.sh
+# Model must be downloaded first: bash nodes/ubuntu26-node1-server/download-model.sh
 
 set -euo pipefail
 
@@ -21,7 +21,7 @@ MODEL_DIR="/data/work/models/$ORG/$MODEL_NAME"
 
 if [[ ! -d "$MODEL_DIR" ]]; then
     echo "ERROR: Model not found at $MODEL_DIR" >&2
-    echo "Run first: bash benchmark/llm/download-model.sh" >&2
+    echo "Run first: bash nodes/ubuntu26-node1-server/download-model.sh" >&2
     exit 1
 fi
 
@@ -49,6 +49,8 @@ HF_ENV=()
 docker run --rm \
     --gpus all \
     -e "HOME=/tmp" \
+    -e "VLLM_RPC_TIMEOUT=300" \
+    -e "VLLM_FLASH_ATTN_VERSION=2" \
     -e "NVIDIA_VISIBLE_DEVICES=$GPUS" \
     --user "$(id -u):$(id -g)" \
     --ipc=host \
@@ -61,5 +63,7 @@ docker run --rm \
     --model "/models" \
     --served-model-name "$MODEL_NAME" \
     --tensor-parallel-size "$TP_SIZE" \
+    --max-model-len 32768 \
+    --enforce-eager \
     --host 0.0.0.0 \
     --port 8000

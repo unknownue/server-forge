@@ -32,6 +32,11 @@ server-forge/
 │
 ├── nodes/                           # Per-machine config (one dir per hostname)
 │   └── <hostname>/                  #   hardware-info.txt, README.md
+│       ├── download-model.sh        #     Download LLM models from HuggingFace
+│       ├── pull-images.sh           #     Pull LLM benchmark Docker images
+│       ├── provision/               #     OS provisioning scripts (one-shot, root)
+│       ├── config/                  #     Post-provisioning configuration
+│       └── unsloth/                 #     Custom Unsloth Studio Docker image
 │                                   #   Copy an existing similar node to create a new one
 │
 ├── inventory/
@@ -45,18 +50,16 @@ server-forge/
 │       └── hardware-info.sh         #   Generic hardware info collector
 │
 ├── benchmark/                       # Performance tests
-│   ├── gpu/
-│   │   ├── gpu-burn.sh
-│   │   ├── nccl-test.sh
-│   │   └── p2p-bandwidth.sh
-│   ├── llm/                         #   LLM inference benchmark (vLLM + AIPerf)
-│   │   ├── download-model.sh        #     Download model from HuggingFace
-│   │   ├── serve-vllm.sh            #     Start vLLM OpenAI-compatible server
-│   │   ├── bench-aiperf.sh          #     Run AIPerf against any endpoint
-│   │   └── run-all.sh               #     Full pipeline: download → serve → bench
-│   ├── storage/fio-bench.sh
-│   ├── network/iperf3-test.sh
-│   └── results/                     #   Benchmark output (not tracked)
+│   ├── llm/
+│   │   ├── serve/                   #   Inference server launchers
+│   │   │   ├── serve-sglang.sh      #     SGLang (Blackwell-compatible)
+│   │   │   ├── serve-vllm.sh        #     vLLM OpenAI-compatible server
+│   │   │   └── serve-unsloth.sh     #     Unsloth Studio
+│   │   └── bench/                   #   Benchmark tools
+│   │       ├── run-all.sh           #     Full pipeline: download → serve → bench
+│   │       ├── bench-aiperf.sh      #     Run AIPerf against any endpoint
+│   │       ├── build-aiperf.sh      #     Build AIPerf Docker image
+│   │       └── test-sglang.sh       #     Quick SGLang smoke test
 │
 ├── tmp/                              # Temporary files (logs, intermediates, not tracked)
 │
@@ -72,8 +75,24 @@ reuse. Each model directory contains:
 - `.revision` — Git revision pinned at download time
 - `.downloaded_at` — ISO 8601 timestamp of download
 
+Downloads are filtered by **format** to avoid pulling unnecessary files:
+
+| Format | Behavior |
+|--------|----------|
+| `safetensors` (default) | Safetensors weights + common configs/tokenizer |
+| `gguf` | All GGUF files + common configs/tokenizer |
+| `gguf:<quant>` | GGUF matching quant (e.g. `gguf:Q4_K_M`) + common |
+| `full` | No filtering — download everything in the repo |
+| custom globs | User-specified `allow_patterns` (space-separated) |
+
+Common files (config.json, tokenizer.*, chat_template.jinja, etc.) are always
+included for `safetensors` and `gguf` formats.
+
+When a model's revision changes, the directory is cleaned before re-downloading
+to prevent stale file accumulation.
+
 Models are never committed to the repository but are reproducible via
-`bash benchmark/llm/download-model.sh [MODEL_ID]`.
+`bash nodes/ubuntu26-node1-server/download-model.sh [MODEL_ID] [REV] [FORMAT]`.
 
 ## Docker Container File Ownership
 
@@ -81,17 +100,43 @@ When Docker containers write to host-mounted directories (`-v /host/path:/contai
 files created inside the container are owned by the container's user (typically root).
 This causes "Permission denied" errors for subsequent host-side operations.
 
-**Rule**: Always include `--user $(id -u):$(id -g)` in `docker run` commands when the
-container writes to host-mounted paths. This ensures created files are owned by the
-host user, not root.
+### Pattern 1: Run as host user (preferred)
 
-When the container needs to resolve the host UID (e.g. PyTorch inductor cache), also
-mount the host's user database:
+Use `--user $(id -u):$(id -g)` so the container process runs as the host user.
+Combine with `HOME=<mount-path>` to redirect writes that would otherwise go to
+`/root/` (inaccessible to non-root users):
 
-    -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro
+```bash
+-v /etc/passwd:/etc/passwd:ro \
+-v /etc/group:/etc/group:ro \
+-e "HOME=/cache" \
+--user "$(id -u):$(id -g)" \
+-v "$CACHE_DIR:/cache"
+```
 
-For containers that require root for internal setup but write output to mounts,
-prefer two-stage: run setup as root, then switch user for the actual workload.
+This is the primary approach, used by `serve-vllm.sh` and `serve-sglang.sh`.
+
+### Pattern 2: ACL fallback (when image requires root)
+
+Some images (e.g. `unsloth/unsloth`) hardcode root in their entrypoint for
+user/password setup and cannot use `--user`. For these, keep the container
+running as root but set ACLs on host directories so root-created files
+remain accessible to the host user:
+
+```bash
+setfacl -R -m "u:$HOST_USER:rwx" /data/cache/unsloth
+setfacl -R -m "d:u:$HOST_USER:rwx" /data/cache/unsloth
+```
+
+The `d:` (default) ACL ensures **future** files/dirs inherit the permission,
+so the container can be recreated repeatedly without losing access.
+
+### One-click fix script
+
+Run `sudo bash scripts/fix-data-permissions.sh` to apply both ownership and
+ACLs to `/data/cache/` and `/data/work/`. Safe to run at any time — it only
+touches directories containers write to, leaving `/data/docker/` and
+`/data/containerd/` untouched.
 
 ## Known Pitfalls & Fixes
 Troubleshooting is documented per-node in `nodes/<hostname>/README.md`.

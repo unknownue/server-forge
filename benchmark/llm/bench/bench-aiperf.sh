@@ -18,7 +18,10 @@ BASE_URL="${1:-http://localhost:8000}"
 MODEL_NAME="${2:-Qwen3.6-27B}"
 HF_MODEL_ID="${3:-Qwen/$MODEL_NAME}"
 NUM_PROMPTS="${NUM_PROMPTS:-100}"
+NUM_REQUESTS="${NUM_REQUESTS:-$NUM_PROMPTS}"
 CONCURRENCY="${AIPERF_CONCURRENCY:-16}"
+WARMUP_REQUESTS="${WARMUP_REQUESTS:-10}"
+OSL="${OSL:-4096}"
 
 AIPERF_IMAGE="aiperf:latest"
 
@@ -39,7 +42,10 @@ echo "  Endpoint      : $BASE_URL"
 echo "  Model         : $MODEL_NAME"
 echo "  Tokenizer     : $HF_MODEL_ID"
 echo "  Num Prompts   : $NUM_PROMPTS"
+echo "  Num Requests  : $NUM_REQUESTS"
 echo "  Concurrency   : $CONCURRENCY"
+echo "  Warmup Reqs   : $WARMUP_REQUESTS"
+echo "  Max Output Tok: $OSL"
 echo "  Result File   : $RESULT_FILE"
 echo ""
 
@@ -59,7 +65,10 @@ docker run --rm \
         --model '$MODEL_NAME' \
         --tokenizer '$HF_MODEL_ID' \
         --num-prompts '$NUM_PROMPTS' \
+        --num-requests '$NUM_REQUESTS' \
+        --num-warmup-requests '$WARMUP_REQUESTS' \
         --concurrency '$CONCURRENCY' \
+        --osl '$OSL' \
         --artifact-dir /results" \
     2>&1 | tee "$RESULT_FILE"
 

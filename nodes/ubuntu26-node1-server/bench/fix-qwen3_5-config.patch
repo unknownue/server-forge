@@ -1,0 +1,28 @@
+--- a/python/sglang/srt/configs/qwen3_5.py
++++ b/python/sglang/srt/configs/qwen3_5.py
+@@ -89,5 +89,25 @@
+         self.vision_end_token_id = vision_end_token_id
+         super().__init__(**kwargs, tie_word_embeddings=tie_word_embeddings)
+
++        # Copy text_config attributes to top level.
++        # Qwen3.6 stores hidden_size, intermediate_size, num_attention_heads etc.
++        # inside text_config, but model code (qwen3_5.py) reads config.hidden_size.
++        _text_attrs = (
++            "hidden_size", "intermediate_size", "num_attention_heads",
++            "num_key_value_heads", "head_dim", "num_hidden_layers",
++            "vocab_size", "rms_norm_eps", "hidden_act", "layer_types",
++            "max_position_embeddings", "rope_theta", "rope_scaling",
++            "partial_rotary_factor", "attention_bias", "attention_dropout",
++            "linear_conv_kernel_dim", "linear_key_head_dim", "linear_value_head_dim",
++            "linear_num_key_heads", "linear_num_value_heads",
++            "full_attention_interval", "moe_intermediate_size",
++            "shared_expert_intermediate_size", "num_experts_per_tok",
++            "num_experts", "decoder_sparse_step",
++            "attn_output_gate", "tie_word_embeddings",
++        )
++        for attr in _text_attrs:
++            if hasattr(self.text_config, attr) and not hasattr(self, attr):
++                setattr(self, attr, getattr(self.text_config, attr))
++
+
+ class Qwen3_5MoeVisionConfig(Qwen3_5VisionConfig):

@@ -4,3 +4,6 @@
 [submodule "submodules/aiperf"]
 	path = submodules/aiperf
 	url = https://github.com/ai-dynamo/aiperf.git
+[submodule "Claude-Code-Game-Studios"]
+	path = Claude-Code-Game-Studios
+	url = https://github.com/Donchitos/Claude-Code-Game-Studios

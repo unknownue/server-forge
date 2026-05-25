@@ -42,7 +42,21 @@ The IaC principle: **only configuration code is backed up; all data is rebuildab
 
 - Compute GPUs: `nvidia-driver-595-server-open` (open kernel modules)
 - Display GPU: `nouveau` (in-kernel, loaded early via initramfs)
-- GRUB params: `nvidia-drm.modeset=1 nvidia-drm.fbdev=1`
+- GRUB params: `nvidia-drm.modeset=1 nvidia-drm.fbdev=1 iommu=off`
+
+### IOMMU / NCCL Multi-GPU Fix
+
+**Problem**: IOMMU DMA remapping causes NCCL P2P deadlock on RTX 6000 Blackwell + PCIe + TP>=2.
+GPUs hang at 100% utilization (~95W, no VRAM growth) and require reset/reboot to recover.
+NCCL stress tests pass, but inference (SGLang, vLLM) deadlocks due to CUDA stream + NCCL
+interleaving under IOMMU DMA translation.
+
+**Fix** (both required):
+
+1. Disable IOMMU — add `iommu=off` to `GRUB_CMDLINE_LINUX` in `/etc/default/grub`, run `update-grub`, reboot.
+2. nvidia_uvm module — `echo "options nvidia_uvm uvm_disable_hmm=1" > /etc/modprobe.d/uvm.conf`, reload or reboot.
+
+Reference: [Level1Techs P2P NCCL Fix](https://forum.level1techs.com/t/dual-rtx-pro-6000-blackwell-max-q-how-to-make-p2p-nccl-work/242403/8)
 
 ## Roles
 
@@ -100,6 +114,8 @@ bash nodes/ubuntu26-node1-server/config/set-git-config.sh "unknownue" "unknownue
 ```bash
 sudo ubuntu-drivers list
 sudo ubuntu-drivers install nvidia-driver-595-server-open
+# Multi-GPU NCCL fix (required for TP>=2):
+echo "options nvidia_uvm uvm_disable_hmm=1" | sudo tee /etc/modprobe.d/uvm.conf
 ```
 
 ### 6. Docker
@@ -136,4 +152,5 @@ EOF
 
 | Date | Issue / Action | Resolution |
 |:---|:---|:---|
+| 2026-05-24 | SGLang/vLLM TP=2 hang on RTX 6000 Blackwell (GPU 100%, NCCL deadlock) | Root cause: IOMMU DMA remapping. Fix: `iommu=off` + `uvm_disable_hmm=1`. |
 | | Initial setup | |

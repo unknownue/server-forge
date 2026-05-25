@@ -43,6 +43,36 @@ if ! docker image inspect "$SGLANG_IMAGE" &>/dev/null; then
     exit 1
 fi
 
+# ── Prepare config patches for Qwen3.6 (hidden_size in text_config) ──
+PATCH_DIR="/data/cache/sglang_patches"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
+# SGLang's own config
+PATCHED_CONFIG="$PATCH_DIR/qwen3_5.py"
+PATCH_FILE="$REPO_ROOT/nodes/ubuntu26-node1-server/bench/fix-qwen3_5-config.patch"
+if [[ ! -f "$PATCHED_CONFIG" ]]; then
+    echo "  Preparing SGLang config patch..."
+    mkdir -p "$PATCH_DIR"
+    docker run --rm --entrypoint "" "$SGLANG_IMAGE" \
+        cat /opt/sglang/python/sglang/srt/configs/qwen3_5.py > "$PATCHED_CONFIG.orig"
+    patch -o "$PATCHED_CONFIG" "$PATCHED_CONFIG.orig" "$PATCH_FILE"
+    echo "  Patched SGLang config: $PATCHED_CONFIG"
+fi
+
+# HF transformers config (AutoConfig resolves to this, not sglang)
+PATCHED_CONFIG_HF="$PATCH_DIR/qwen3_5_hf.py"
+PATCH_FILE_HF="$REPO_ROOT/nodes/ubuntu26-node1-server/bench/fix-qwen3_5-config-hf.patch"
+if [[ ! -f "$PATCHED_CONFIG_HF" ]]; then
+    echo "  Preparing HF config patch..."
+    mkdir -p "$PATCH_DIR"
+    docker run --rm --entrypoint "" "$SGLANG_IMAGE" \
+        cat /opt/venv/lib/python3.12/site-packages/transformers/models/qwen3_5/configuration_qwen3_5.py \
+        > "$PATCHED_CONFIG_HF.orig"
+    patch -o "$PATCHED_CONFIG_HF" "$PATCHED_CONFIG_HF.orig" "$PATCH_FILE_HF"
+    echo "  Patched HF config: $PATCHED_CONFIG_HF"
+fi
+
 CACHE_DIR="/data/cache/sglang_jit"
 mkdir -p "$CACHE_DIR"
 
@@ -75,6 +105,11 @@ docker run --rm \
     -e "SGLANG_ENABLE_JIT_DEEPGEMM=0" \
     -e "SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1" \
     -e "SGLANG_ENABLE_SPEC_V2=1" \
+    -e "NCCL_P2P_LEVEL=PHB" \
+    -e "NCCL_IB_DISABLE=1" \
+    -e "NCCL_MIN_NCHANNELS=8" \
+    -e "NCCL_ALLOC_P2P_NET_LL_BUFFERS=1" \
+    -e "OMP_NUM_THREADS=8" \
     -e "HOME=/cache" \
     --user "$(id -u):$(id -g)" \
     --ipc=host \
@@ -84,6 +119,8 @@ docker run --rm \
     -p "$PORT:8000" \
     -v "$MODEL_DIR:/models:ro" \
     -v "$CACHE_DIR:/cache:rw" \
+    -v "$PATCHED_CONFIG:/opt/sglang/python/sglang/srt/configs/qwen3_5.py:ro" \
+    -v "$PATCHED_CONFIG_HF:/opt/venv/lib/python3.12/site-packages/transformers/models/qwen3_5/configuration_qwen3_5.py:ro" \
     "$SGLANG_IMAGE" \
     sglang serve \
     --model-path "/models" \

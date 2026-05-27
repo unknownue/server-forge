@@ -1,0 +1,242 @@
+# Game Studio Server — Service Definitions
+# Maps service types to GPU allocations, models, ports, and quantization.
+#
+# 27B Dense: FP8 runtime quantization (--quantization fp8) — halves memory.
+# 35B-A3B MoE: BF16 (no quantization) — RTX 6000D shared memory (99KB/SM)
+#   too small for Triton FP8 MoE kernels (require 144KB). BF16 kernels fit.
+# FP8 KV cache (--kv-cache-dtype fp8_e5m2) on all instances.
+# Image generation on GPU 3 via ComfyUI with FLUX.2 FP8.
+#
+# Date: 2026-05-27
+# Tested: multi-agent simulation, 4 agents × 10 requests, OSL=2048
+
+version: "3.0"
+
+# ── GPU Topology ──
+gpu_topology:
+  total_gpus: 4
+  gpu_model: "NVIDIA RTX 6000D"
+  vram_per_gpu_gb: 85.6
+  interconnect: "PCIe Gen5"
+  numa_nodes: 1
+  p2p_enabled: true
+
+# ── Default Plan: 2×27B FP8 + 35B-A3B BF16 (MoE) + FLUX.2 FP8 ──
+default:
+  description: "Dual 27B for coordination/multimodal + MoE for code gen + FLUX.2 for game art"
+  download_required:
+    - "Qwen/Qwen3.6-35B-A3B"
+  total_throughput_tok_s: 504
+  note: "Measured with 4-agent concurrent simulation, OSL=2048, reasoning-parser qwen3"
+
+  text_instances:
+    - name: "coordinator"
+      gpu: [0]
+      tp: 1
+      port: 8000
+      model: "Qwen/Qwen3.6-27B"
+      quantization: "fp8"
+      purpose: "Project coordination, architecture review, multimodal (image/video)"
+      measured_tok_s: 82.8
+      concurrent_8k: 29
+      memory:
+        weights_gb: 26
+        kv_cache_gb: 57.6
+        per_token_kv_kb: 256
+
+    - name: "code-generator-moe"
+      gpu: [1]
+      tp: 1
+      port: 8001
+      model: "Qwen/Qwen3.6-35B-A3B"
+      quantization: "bf16"
+      purpose: "Code generation (MoE 35B total, 3B active/token — 4× faster than 27B Dense)"
+      measured_tok_s: 338.1
+      concurrent_8k: 39
+      memory:
+        weights_gb: 70
+        kv_cache_gb: 13.6
+        per_token_kv_kb: 256
+      architecture: "Mixture of Experts — 35B params, 3B activated per token"
+      limitations:
+        - "BF16 only: RTX 6000D shared memory (99KB/SM) too small for Triton FP8 MoE kernels (144KB required)"
+        - "Uses --cuda-graph-max-bs 4 to avoid large kernel configs"
+        - "Reduced KV cache (~13.6GB) due to BF16 weights — still sufficient for agent workloads"
+
+    - name: "multimodal-qa"
+      gpu: [2]
+      tp: 1
+      port: 8002
+      model: "Qwen/Qwen3.6-27B"
+      quantization: "fp8"
+      purpose: "Multimodal (screenshot/video) + deep reasoning + QA validation"
+      measured_tok_s: 82.7
+      concurrent_8k: 29
+      memory:
+        weights_gb: 26
+        kv_cache_gb: 57.6
+
+  image_generation:
+    - name: "flux2-comfyui"
+      gpu: [3]
+      port: 8188
+      model: "Comfy-Org/flux2-dev"
+      backend: "ComfyUI"
+      quantization: "fp8mixed"
+      purpose: "Game art assets, sprite generation, concept art"
+      memory:
+        weights_gb: 50
+        free_vram_gb: 35.6
+
+# ── Plan 72B: Strongest Coordinator ──
+plan_72b:
+  description: "72B Dense for supreme coordination + 27B multimodal + FLUX.2"
+  download_required:
+    - "Qwen/Qwen3-72B"
+
+  text_instances:
+    - name: "supreme-coordinator"
+      gpu: [0, 1]
+      tp: 2
+      port: 8000
+      model: "Qwen/Qwen3-72B"
+      quantization: "fp8"
+      purpose: "Supreme coordination, deep architecture, multi-doc synthesis"
+      expected_tok_s: 250
+      concurrent_8k: 38
+      memory:
+        weights_gb: 72
+        kv_cache_per_gpu_gb: 47.6
+
+    - name: "multimodal-code"
+      gpu: [2]
+      tp: 1
+      port: 8001
+      model: "Qwen/Qwen3.6-27B"
+      quantization: "fp8"
+      purpose: "Multimodal (screenshot/video) + code generation"
+      expected_tok_s: 400
+      concurrent_8k: 29
+
+  image_generation:
+    - name: "flux2-comfyui"
+      gpu: [3]
+      port: 8188
+      model: "Comfy-Org/flux2-dev"
+
+# ── Plan Reasoning: Deep CoT + MoE Code ──
+plan_reasoning:
+  description: "R1-Distill-32B for deep reasoning + MoE code gen + 27B multimodal + FLUX.2"
+  download_required:
+    - "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
+    - "Qwen/Qwen3.6-35B-A3B"
+
+  text_instances:
+    - name: "reasoning-coordinator"
+      gpu: [0]
+      tp: 1
+      port: 8000
+      model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
+      quantization: "fp8"
+      purpose: "Deep chain-of-thought reasoning, architecture decisions, bug analysis"
+      expected_tok_s: 350
+      concurrent_8k: 53
+
+    - name: "code-generator-moe"
+      gpu: [1]
+      tp: 1
+      port: 8001
+      model: "Qwen/Qwen3.6-35B-A3B"
+      quantization: "bf16"
+      purpose: "Code generation (MoE 35B→3B active) — BF16: RTX 6000D shared memory too small for FP8 kernels"
+      measured_tok_s: 338
+      concurrent_8k: 39
+
+    - name: "multimodal-qa"
+      gpu: [2]
+      tp: 1
+      port: 8002
+      model: "Qwen/Qwen3.6-27B"
+      quantization: "fp8"
+      purpose: "Multimodal + QA validation"
+      measured_tok_s: 83
+      concurrent_8k: 29
+
+  image_generation:
+    - name: "flux2-comfyui"
+      gpu: [3]
+      port: 8188
+      model: "Comfy-Org/flux2-dev"
+
+# ── Agent-to-Service Routing ──
+agent_routing:
+  project_coordination:
+    default:      { target: "coordinator", port: 8000, model: "Qwen3.6-27B" }
+    plan_72b:     { target: "supreme-coordinator", port: 8000, model: "Qwen3-72B" }
+    plan_reasoning: { target: "reasoning-coordinator", port: 8000, model: "DeepSeek-R1-Distill-32B" }
+
+  architecture_review:
+    default:      { target: "coordinator", port: 8000 }
+    plan_72b:     { target: "supreme-coordinator", port: 8000 }
+    plan_reasoning: { target: "reasoning-coordinator", port: 8000 }
+
+  code_generation:
+    default:      { target: "code-generator-moe", port: 8001, model: "Qwen3.6-35B-A3B" }
+    plan_72b:     { target: "multimodal-code", port: 8001, model: "Qwen3.6-27B" }
+    plan_reasoning: { target: "code-generator-moe", port: 8001, model: "Qwen3.6-35B-A3B" }
+
+  visual_analysis:
+    all:          { target: "multimodal-capable", ports: [8000, 8002], model: "Qwen3.6-27B" }
+
+  fast_iteration:
+    all:          { target: "code-generator-moe", port: 8001, model: "Qwen3.6-35B-A3B" }
+
+  image_generation:
+    all:          { target: "flux2-comfyui", port: 8188, api: "ComfyUI /prompt" }
+
+# ── Model Architecture Reference ──
+models:
+  Qwen3.6-27B:
+    type: "Dense Transformer"
+    multimodal: true
+    vision_encoder: "27-layer, 1152-dim hidden, 5120-dim output"
+    fp8_weight_gb: 26
+    kv_per_token_kb: 256
+    layers: { full_attention: 16, linear_attention: 48, total: 64 }
+
+  Qwen3.6-35B-A3B:
+    type: "Mixture of Experts (MoE)"
+    total_params: "35B"
+    active_per_token: "3B"
+    fp8_weight_gb: 35
+    kv_per_token_kb: 256
+    note: "Wide knowledge (35B params) + fast inference (3B compute) — ideal for code generation"
+
+  DeepSeek-R1-Distill-Qwen-32B:
+    type: "Dense Transformer with CoT reasoning"
+    fp8_weight_gb: 31
+    kv_per_token_kb: 256
+    note: "Chain-of-thought reasoning specialist"
+
+  FLUX.2-dev:
+    type: "Rectified Flow Transformer (32B params)"
+    architecture: "Built on Mistral-3 VLM, Comfy-Org FP8 mixed precision"
+    fp8_weight_gb: 50
+    backend: "ComfyUI"
+    note: "NVIDIA-optimized, RTX 6000D native FP8 support"
+
+# ── Quantization Reference ──
+quantization:
+  fp8:
+    method: "Runtime quantization via SGLang --quantization fp8"
+    weight_size: "50% of BF16"
+    quality_loss: "<1% on benchmarks"
+    kv_cache: "--kv-cache-dtype fp8_e5m2 (additional 2x KV cache savings)"
+  fp8mixed:
+    method: "Pre-quantized FP8 mixed safetensors (Comfy-Org)"
+    weight_size: "~50% of BF16"
+    backend: "ComfyUI native loading"
+  nvfp4:
+    method: "NVIDIA ModelOpt NVFP4 (Blackwell native)"
+    weight_size: "25% of BF16, native hardware support"
+    note: "unsloth/Qwen3.6-27B-NVFP4 available locally — SGLang support TBD"

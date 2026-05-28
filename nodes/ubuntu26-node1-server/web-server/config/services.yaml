@@ -1,0 +1,262 @@
+# Web Studio Server — Service Definitions
+# Maps service types to GPU allocations, models, ports, and quantization.
+#
+# All models run FP8 runtime quantization (--quantization fp8). FP8 KV cache
+# (--kv-cache-dtype fp8_e5m2) on all instances. MoE FP8 kernel compatibility
+# is assumed resolved (SGLang/Triton update).
+# No image generation — all 4 GPUs dedicated to text inference.
+#
+# Date: 2026-05-28
+
+version: "3.0"
+
+# ── GPU Topology ──
+gpu_topology:
+  total_gpus: 4
+  gpu_model: "NVIDIA RTX 6000D"
+  vram_per_gpu_gb: 85.6
+  interconnect: "PCIe Gen5"
+  numa_nodes: 1
+  p2p_enabled: true
+
+# ── Default Plan: 3×27B FP8 + 35B-A3B BF16 (MoE) ──
+default:
+  description: "Triple 27B interchangeable pool + MoE for code gen"
+  download_required:
+    - "Qwen/Qwen3.6-35B-A3B"
+  total_throughput_tok_s: 586
+  note: "27B pool (3×82.8) + MoE (338.1) = ~586 tok/s"
+
+  text_instances:
+    - name: "ws-27b-a"
+      gpu: [0]
+      tp: 1
+      port: 8000
+      model: "Qwen/Qwen3.6-27B"
+      quantization: "fp8"
+      context_length: 40960
+      purpose: "General purpose, architecture, cross-file reasoning"
+      measured_tok_s: 82.8
+      concurrent_8k: 29
+      memory:
+        weights_gb: 26
+        kv_cache_gb: 57.6
+        per_token_kv_kb: 256
+
+    - name: "ws-35b-moe-code"
+      gpu: [1]
+      tp: 1
+      port: 8001
+      model: "Qwen/Qwen3.6-35B-A3B"
+      quantization: "fp8"
+      context_length: 40960
+      purpose: "Code generation (MoE 35B total, 3B active/token — 4× faster than 27B Dense)"
+      measured_tok_s: 338.1
+      concurrent_8k: 48
+      memory:
+        weights_gb: 35
+        kv_cache_gb: 48.6
+        per_token_kv_kb: 256
+      architecture: "Mixture of Experts — 35B params, 3B activated per token"
+      note: "FP8 reduces weights 70→35 GB; KV Cache 13.6→48.6 GB (+257%)"
+
+    - name: "ws-27b-b"
+      gpu: [2]
+      tp: 1
+      port: 8002
+      model: "Qwen/Qwen3.6-27B"
+      quantization: "fp8"
+      context_length: 40960
+      purpose: "General purpose, DB schema design, UI/UX, QA"
+      measured_tok_s: 82.7
+      concurrent_8k: 29
+      memory:
+        weights_gb: 26
+        kv_cache_gb: 57.6
+
+    - name: "ws-27b-c"
+      gpu: [3]
+      tp: 1
+      port: 8003
+      model: "Qwen/Qwen3.6-27B"
+      quantization: "fp8"
+      context_length: 40960
+      purpose: "General purpose, security audit, DevOps config"
+      measured_tok_s: 82.7
+      concurrent_8k: 29
+      memory:
+        weights_gb: 26
+        kv_cache_gb: 57.6
+
+  api_proxy:
+    - name: "ws-proxy"
+      port: 8090
+      image: "server-forge/anthropic-proxy:latest"
+      purpose: "API format translation — Anthropic Messages API ↔ OpenAI Chat Completions"
+      runtime:
+        memory_mb: 100
+        cpu_cores: 0.1
+        gpu: false
+      routing:
+        Qwen3.6-27B-FP8:     { default_target: ":8000", pool: [":8000", ":8002", ":8003"] }
+        Qwen3.6-35B-A3B-FP8: { target: ":8001" }
+      fuzzy:
+        "35B/A3B/MoE": ":8001"
+        "27B/72B/32B": ":8000"
+      endpoints:
+        - "/v1/messages          (Anthropic Messages API)"
+        - "/v1/chat/completions  (OpenAI passthrough)"
+      note: "Runs on CPU — <1ms translation overhead. :8000 is default for 27B."
+
+# ── Plan 72B: Largest Dense Model ──
+plan_72b:
+  description: "72B Dense for complex reasoning + 2×27B for throughput"
+  download_required:
+    - "Qwen/Qwen3-72B"
+
+  text_instances:
+    - name: "ws-72b"
+      gpu: [0, 1]
+      tp: 2
+      port: 8000
+      model: "Qwen/Qwen3-72B"
+      quantization: "fp8"
+      context_length: 65536
+      purpose: "Complex architecture decisions, multi-file deep analysis"
+      expected_tok_s: 250
+      concurrent_8k: 38
+      memory:
+        weights_gb: 72
+        kv_cache_per_gpu_gb: 47.6
+
+    - name: "ws-27b-a"
+      gpu: [2]
+      tp: 1
+      port: 8001
+      model: "Qwen/Qwen3.6-27B"
+      quantization: "fp8"
+      context_length: 40960
+      purpose: "Code generation + general purpose"
+      expected_tok_s: 83
+      concurrent_8k: 29
+
+    - name: "ws-27b-b"
+      gpu: [3]
+      tp: 1
+      port: 8002
+      model: "Qwen/Qwen3.6-27B"
+      quantization: "fp8"
+      context_length: 40960
+      purpose: "General purpose + QA"
+      expected_tok_s: 83
+      concurrent_8k: 29
+
+# ── Plan Reasoning: Deep CoT + MoE Code ──
+plan_reasoning:
+  description: "R1-Distill-32B for deep reasoning + MoE code gen + 2×27B general purpose"
+  download_required:
+    - "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
+    - "Qwen/Qwen3.6-35B-A3B"
+
+  text_instances:
+    - name: "ws-r1-reason"
+      gpu: [0]
+      tp: 1
+      port: 8000
+      model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
+      quantization: "fp8"
+      context_length: 65536
+      purpose: "Deep chain-of-thought reasoning, complex debugging, architecture analysis"
+      expected_tok_s: 350
+      concurrent_8k: 53
+
+    - name: "ws-35b-moe-code"
+      gpu: [1]
+      tp: 1
+      port: 8001
+      model: "Qwen/Qwen3.6-35B-A3B"
+      quantization: "fp8"
+      context_length: 40960
+      purpose: "Code generation (MoE 35B→3B active)"
+      measured_tok_s: 338
+      concurrent_8k: 48
+
+    - name: "ws-27b-a"
+      gpu: [2]
+      tp: 1
+      port: 8002
+      model: "Qwen/Qwen3.6-27B"
+      quantization: "fp8"
+      context_length: 40960
+      purpose: "General purpose + multimodal"
+      measured_tok_s: 83
+      concurrent_8k: 29
+
+    - name: "ws-27b-b"
+      gpu: [3]
+      tp: 1
+      port: 8003
+      model: "Qwen/Qwen3.6-27B"
+      quantization: "fp8"
+      context_length: 40960
+      purpose: "General purpose + QA"
+      measured_tok_s: 83
+      concurrent_8k: 29
+
+# ── Agent-to-Service Routing (Web Dev) ──
+agent_routing:
+  architecture_design:
+    all: { target: "27B pool", ports: [8000, 8002, 8003], model: "Qwen3.6-27B-FP8" }
+
+  code_generation:
+    all: { target: "MoE", port: 8001, model: "Qwen3.6-35B-A3B-FP8" }
+
+  database_design:
+    all: { target: "27B pool", ports: [8000, 8002, 8003] }
+
+  ui_ux_review:
+    all: { target: "27B pool", ports: [8000, 8002, 8003] }
+
+  security_audit:
+    all: { target: "27B pool", ports: [8000, 8002, 8003] }
+
+  qa_testing:
+    all: { target: "27B pool", ports: [8000, 8002, 8003] }
+
+  devops_config:
+    all: { target: "MoE", port: 8001 }
+
+  fast_iteration:
+    all: { target: "MoE", port: 8001 }
+
+# ── Model Architecture Reference ──
+models:
+  Qwen3.6-27B:
+    type: "Dense Transformer"
+    multimodal: true
+    vision_encoder: "27-layer, 1152-dim hidden, 5120-dim output"
+    fp8_weight_gb: 26
+    kv_per_token_kb: 256
+    layers: { full_attention: 16, linear_attention: 48, total: 64 }
+
+  Qwen3.6-35B-A3B:
+    type: "Mixture of Experts (MoE)"
+    total_params: "35B"
+    active_per_token: "3B"
+    fp8_weight_gb: 35
+    kv_per_token_kb: 256
+    note: "Wide knowledge (35B params) + fast inference (3B compute) — ideal for code generation"
+
+  DeepSeek-R1-Distill-Qwen-32B:
+    type: "Dense Transformer with CoT reasoning"
+    fp8_weight_gb: 31
+    kv_per_token_kb: 256
+    note: "Chain-of-thought reasoning specialist"
+
+# ── Quantization Reference ──
+quantization:
+  fp8:
+    method: "Runtime quantization via SGLang --quantization fp8"
+    weight_size: "50% of BF16"
+    quality_loss: "<1% on benchmarks"
+    kv_cache: "--kv-cache-dtype fp8_e5m2 (additional 2x KV cache savings)"

@@ -11,14 +11,16 @@
 # working simultaneously, then measures throughput and latency distribution.
 #
 # Usage:
-#   bash nodes/ubuntu26-node1-server/game-server/test/simulate-agents.sh [ENDPOINT]
+#   bash nodes/ubuntu26-node1-server/game-server/test/simulate-agents.sh [ENDPOINT] [--format openai|anthropic]
 #
 # Default: http://localhost:8000
 #
 # Environment:
-#   NUM_AGENTS=4        — number of concurrent agent processes
-#   AGENT_REQUESTS=10   — requests per agent
-#   AGENT_CONCURRENCY=4 — concurrent requests within each agent
+#   API_FORMAT=anthropic  — use Anthropic Messages API (/v1/messages)
+#   API_FORMAT=openai     — use OpenAI Chat Completions API (default)
+#   NUM_AGENTS=4          — number of concurrent agent processes
+#   AGENT_REQUESTS=10     — requests per agent
+#   AGENT_CONCURRENCY=4   — concurrent requests within each agent
 
 set -euo pipefail
 
@@ -30,6 +32,15 @@ NUM_AGENTS="${NUM_AGENTS:-4}"
 AGENT_REQUESTS="${AGENT_REQUESTS:-10}"
 AGENT_CONCURRENCY="${AGENT_CONCURRENCY:-4}"
 OSL="${OSL:-2048}"
+API_FORMAT="${API_FORMAT:-openai}"
+
+# Parse --format flag
+for arg in "$@"; do
+    case "$arg" in
+        --format) API_FORMAT="${2:-openai}"; shift ;;
+        --format=*) API_FORMAT="${arg#*=}" ;;
+    esac
+done
 
 MODEL_NAME="${MODEL_NAME:-$(curl -s "$ENDPOINT/v1/models" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data'][0]['id'])" 2>/dev/null || echo 'Qwen3.6-27B')}"
 
@@ -159,9 +170,15 @@ run_agent() {
         local resp_file
         resp_file=$(mktemp)
 
-        # Build JSON payload via stdin to avoid shell escaping issues
+        # Build JSON payload and set API path
         local payload_file
         payload_file=$(mktemp)
+        local api_path
+        if [[ "$API_FORMAT" == "anthropic" ]]; then
+            api_path="/v1/messages"
+        else
+            api_path="/v1/chat/completions"
+        fi
         python3 -c "
 import json, sys
 prompt = sys.stdin.read()
@@ -175,7 +192,7 @@ print(json.dumps({
 
         local http_code
         http_code=$(curl -s --max-time 300 -o "$resp_file" -w '%{http_code}' \
-            "http://localhost:$port/v1/chat/completions" \
+            "http://localhost:$port${api_path}" \
             -H "Content-Type: application/json" \
             -d "@$payload_file" 2>/dev/null)
         rm -f "$payload_file"
@@ -192,8 +209,14 @@ print(json.dumps({
 import json
 try:
     d = json.load(open('$resp_file'))
-    prompt_tokens = d.get('usage', {}).get('prompt_tokens', 0)
-    completion_tokens = d.get('usage', {}).get('completion_tokens', 0)
+    if '$API_FORMAT' == 'anthropic':
+        usage = d.get('usage', {})
+        prompt_tokens = usage.get('input_tokens', 0)
+        completion_tokens = usage.get('output_tokens', 0)
+    else:
+        usage = d.get('usage', {})
+        prompt_tokens = usage.get('prompt_tokens', 0)
+        completion_tokens = usage.get('completion_tokens', 0)
     print(f'{prompt_tokens + completion_tokens}|{completion_tokens}')
 except: print('0|0')
 " 2>/dev/null)
@@ -232,6 +255,7 @@ echo ""
 echo "============================================"
 echo "  Agent Team Simulation"
 echo "  Endpoint  : $ENDPOINT"
+echo "  API Format: $API_FORMAT"
 echo "  Model     : $MODEL_NAME"
 echo "  Agents    : $NUM_AGENTS"
 echo "  Req/Agent : $AGENT_REQUESTS"

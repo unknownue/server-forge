@@ -95,7 +95,7 @@ docker run --rm -d \
         --model-path "/models" \
         --served-model-name "$(basename "$MODEL_DIR")" \
         --tp-size "$TP" \
-        --context-length 32768 \
+        --context-length 40960\
         --host 0.0.0.0 \
         --port 8000 \
         --attention-backend flashinfer \

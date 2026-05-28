@@ -16,10 +16,9 @@ Image generation via ComfyUI + FLUX.2 FP8 on dedicated GPU.
 
 | 能力 | 负责模型 | 状态 |
 |------|---------|------|
-| 项目统筹、架构规划 | Qwen3.6-27B FP8 (GPU 0) | ✅ 已部署 |
-| 代码生成主力 | Qwen3.6-35B-A3B BF16 (GPU 1) | ✅ 已部署 |
-| 多模态 + 深度推理 | Qwen3.6-27B FP8 (GPU 2) | ✅ 已部署 |
-| 图像生成（游戏美术） | FLUX.2 FP8 via ComfyUI (GPU 3) | ✅ 已部署 |
+| 文本推理 (×3) | Qwen3.6-27B FP8 + Qwen3.6-35B-A3B MoE | ✅ 已部署 |
+| 图像生成 | FLUX.2 FP8 via ComfyUI (GPU 3) | ✅ 已部署 |
+| API 格式翻译 | Anthropic↔OpenAI Proxy (:8090) | ✅ 已部署 |
 
 ## Why This Topology
 
@@ -32,11 +31,15 @@ a net negative in both time and token cost.
 
 Instead, we use three capable models on GPUs 0-2:
 
-| GPU | Model | Type | Role |
-|-----|-------|------|------|
-| 0 | Qwen3.6-27B FP8 | Dense | Project coordination, architecture, multimodal (screenshot/UI review) |
-| 1 | Qwen3.6-35B-A3B BF16 | MoE | Code generation powerhouse (35B knowledge, 3B compute/token) |
-| 2 | Qwen3.6-27B FP8 | Dense | Multimodal + deep reasoning + QA validation |
+| GPU | Model | Type | Characteristics |
+|-----|-------|------|-----------------|
+| 0 | Qwen3.6-27B FP8 | Dense | Full-param reasoning, multimodal |
+| 1 | Qwen3.6-35B-A3B BF16 | MoE | 35B knowledge, 3B compute/token, 4× throughput |
+| 2 | Qwen3.6-27B FP8 | Dense | Full-param reasoning, multimodal (identical to GPU 0) |
+
+GPUs 0 and 2 are **interchangeable** — both run the same 27B model. Distribute load
+across them rather than reserving each for specific roles. The MoE on GPU 1 is
+optimized for high-throughput tasks (code generation, bulk analysis).
 
 ### Dense vs MoE: Complementary Strengths
 
@@ -63,10 +66,11 @@ bash nodes/ubuntu26-node1-server/game-server/deploy.sh
 ```
 
 ```
-GPU 0: Qwen3.6-27B    FP8  TP=1 → :8000  统筹规划 + 多模态(截图/UI审核)
-GPU 1: Qwen3.6-35B-A3B BF16 TP=1 → :8001  代码生成主力(MoE 35B→3B active)
-GPU 2: Qwen3.6-27B    FP8  TP=1 → :8002  多模态 + 深度推理 + QA
-GPU 3: FLUX.2 FP8     ComfyUI   → :8188  图像生成(游戏美术)
+GPU 0: Qwen3.6-27B    FP8  TP=1 → :8000
+GPU 1: Qwen3.6-35B-A3B BF16 TP=1 → :8001 (MoE 35B→3B active)
+GPU 2: Qwen3.6-27B    FP8  TP=1 → :8002 (identical to GPU 0)
+GPU 3: FLUX.2 FP8     ComfyUI   → :8188
+Proxy: anthropic-proxy  CPU     → :8090  Anthropic↔OpenAI
 ```
 
 | 指标 | 数值 |
@@ -75,6 +79,7 @@ GPU 3: FLUX.2 FP8     ComfyUI   → :8188  图像生成(游戏美术)
 | 27B (FP8) 吞吐 | 82.8 tok/s (4 agent 并发) |
 | 35B-A3B (BF16) 吞吐 | 338.1 tok/s (4 agent 并发, 4x 27B) |
 | 图像生成 | ✅ :8188 |
+| API 格式 | ✅ OpenAI + Anthropic (via :8090 proxy) |
 
 ### Alternative Plans
 
@@ -83,14 +88,14 @@ bash nodes/ubuntu26-node1-server/game-server/deploy.sh plan-72b       # 72B TP=2
 bash nodes/ubuntu26-node1-server/game-server/deploy.sh plan-reasoning # R1-32B deep reasoning
 ```
 
-### Plan 72B — Strongest Coordinator
+### Plan 72B — Largest Dense Model
 
 Download `Qwen/Qwen3-72B` first.
 
 ```
-GPU 0,1: Qwen3-72B   FP8 TP=2 → :8000  最强统筹/架构
-GPU 2:   Qwen3.6-27B FP8 TP=1 → :8001  多模态 + 代码
-GPU 3:   FLUX.2 FP8  ComfyUI  → :8188  图像生成
+GPU 0,1: Qwen3-72B   FP8 TP=2 → :8000
+GPU 2:   Qwen3.6-27B FP8 TP=1 → :8001
+GPU 3:   FLUX.2 FP8  ComfyUI  → :8188
 ```
 
 ### Plan Reasoning — Deep CoT + MoE
@@ -98,10 +103,10 @@ GPU 3:   FLUX.2 FP8  ComfyUI  → :8188  图像生成
 Download `deepseek-ai/DeepSeek-R1-Distill-Qwen-32B` first.
 
 ```
-GPU 0: R1-Distill-32B  FP8 TP=1 → :8000  深度推理(CoT)
-GPU 1: Qwen3.6-35B-A3B FP8 TP=1 → :8001  代码生成(MoE)
-GPU 2: Qwen3.6-27B     FP8 TP=1 → :8002  多模态 + QA
-GPU 3: FLUX.2 FP8      ComfyUI  → :8188  图像生成
+GPU 0: R1-Distill-32B  FP8 TP=1 → :8000
+GPU 1: Qwen3.6-35B-A3B FP8 TP=1 → :8001 (MoE)
+GPU 2: Qwen3.6-27B     FP8 TP=1 → :8002
+GPU 3: FLUX.2 FP8      ComfyUI  → :8188
 ```
 
 ## Concurrency Analysis
@@ -177,18 +182,24 @@ For CCGS integration, the art-director and technical-artist agents submit workfl
 programmatically to `:8188/prompt`. See [AGENT-CONFIG.md](AGENT-CONFIG.md) for complete
 agent-to-endpoint routing.
 
-## CCGS Agent Routing Summary
+## Routing Recommendations
 
-| Agent Tier | Primary Endpoint | Task Types |
-|-----------|-----------------|------------|
-| Tier 1 Directors | Claude-hosted (Opus) | Vision, architecture, gate decisions |
-| Code Generation (~15 agents) | **:8001 (MoE)** | GDScript, C#, C++, shaders, tools |
-| Design & Narrative (~8 agents) | **:8000 (27B)** | GDD authoring, systems, world-building |
-| QA & Validation (~6 agents) | **:8002 (27B)** | Test plans, bug analysis, accessibility |
-| Art & Visual (~3 agents) | **:8188 (FLUX.2)** | Sprites, concept art, UI mockups |
+Role assignment is handled by downstream consumers — the infrastructure does not
+bind specific tasks to specific GPUs. All three text endpoints serve identical APIs.
 
-Detailed per-agent mapping, integration patterns, and performance budgets
-in [AGENT-CONFIG.md](AGENT-CONFIG.md).
+| Endpoint | Model | Throughput | Typical Fit |
+|----------|-------|-----------|-------------|
+| :8000, :8002 | Qwen3.6-27B FP8 | 82.8 tok/s each | General purpose, design, analysis, multimodal |
+| :8001 | Qwen3.6-35B-A3B MoE | 338.1 tok/s | Code generation, high-throughput tasks |
+| :8188 | FLUX.2 FP8 | — | Image generation |
+| :8090 (proxy) | — | — | Unified entry, Anthropic + OpenAI formats |
+
+- :8000 and :8002 are **interchangeable** — distribute load across both
+- Prefer :8001 for code-heavy, high-volume work (4× throughput)
+- Tier 1 directors benefit from Anthropic-hosted Claude models
+- **Claude Code setup**: set `ANTHROPIC_BASE_URL=http://localhost:8090/v1` and
+  `ANTHROPIC_DEFAULT_SONNET_MODEL=Qwen3.6-35B-A3B-FP8` — full config in
+  [AGENT-CONFIG.md](AGENT-CONFIG.md#claude-code-configuration)
 
 ## Quick Start
 
@@ -199,7 +210,17 @@ bash scripts/lib/download-model.sh
 # 2. Deploy
 bash nodes/ubuntu26-node1-server/game-server/deploy.sh
 
-# 3. Stop all services
+# 3. Test endpoints (OpenAI format)
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"Qwen3.6-27B","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
+
+# 4. Test endpoints (Anthropic format, via proxy :8090)
+curl http://localhost:8090/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-sonnet-4-6","max_tokens":32,"messages":[{"role":"user","content":"Hello"}]}'
+
+# 5. Stop all services
 bash nodes/ubuntu26-node1-server/game-server/stop.sh
 ```
 
@@ -209,8 +230,11 @@ bash nodes/ubuntu26-node1-server/game-server/stop.sh
 # Single endpoint benchmark
 bash nodes/ubuntu26-node1-server/game-server/test/throughput-test.sh http://localhost:8000
 
-# Multi-agent simulation
+# Multi-agent simulation (OpenAI format)
 NUM_AGENTS=8 AGENT_REQUESTS=10 bash nodes/ubuntu26-node1-server/game-server/test/simulate-agents.sh http://localhost:8000
+
+# Multi-agent simulation (Anthropic format, through proxy)
+NUM_AGENTS=8 AGENT_REQUESTS=10 API_FORMAT=anthropic bash nodes/ubuntu26-node1-server/game-server/test/simulate-agents.sh http://localhost:8090
 
 # Cross-plan comparison
 bash nodes/ubuntu26-node1-server/game-server/test/compare-configs.sh full
@@ -272,10 +296,12 @@ game-server/
 ├── stop.sh                      # Stop all containers
 ├── config/
 │   ├── nginx-lb.template.conf   # Nginx load balancer template
-│   └── services.yaml            # Service definitions and routing table
+│   ├── services.yaml            # Service definitions and routing table
+│   └── proxy.dockerfile         # Anthropic↔OpenAI translation proxy image
 ├── serve/
 │   ├── serve-text.sh            # Start single text model instance
-│   └── serve-image-gen.sh       # ComfyUI + FLUX.2 FP8 launcher
+│   ├── serve-image-gen.sh       # ComfyUI + FLUX.2 FP8 launcher
+│   └── anthropic-proxy.py       # API translation proxy (Anthropic↔OpenAI)
 ├── test/
 │   ├── throughput-test.sh       # AIPerf benchmark on single endpoint
 │   ├── simulate-agents.sh       # Multi-agent workload simulation

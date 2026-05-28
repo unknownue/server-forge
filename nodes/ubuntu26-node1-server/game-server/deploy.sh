@@ -19,6 +19,8 @@ PLAN="${1:-default}"
 
 SGLANG_IMAGE="voipmonitor/sglang:test-cu132"
 COMFYUI_IMAGE="yanwk/comfyui-boot:cu128-slim"
+PROXY_IMAGE="server-forge/anthropic-proxy:latest"
+PROXY_PORT="8090"
 CACHE_DIR="/data/cache/sglang_jit"
 COMFYUI_HOME="/data/cache/comfyui"
 FLUX_SRC_DIR="/data/work/models/Comfy-Org/flux2-dev/split_files"
@@ -31,7 +33,7 @@ declare -A INSTANCE_NAME INSTANCE_GPUS INSTANCE_PORT INSTANCE_MODEL INSTANCE_TP 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
 # ── Shared SGLang flags ──
-SHARED_ARGS="--context-length 32768 --host 0.0.0.0 --port 8000 \
+SHARED_ARGS="--host 0.0.0.0 --port 8000 \
 --attention-backend flashinfer --kv-cache-dtype fp8_e5m2 \
 --mem-fraction-static 0.85"
 
@@ -56,11 +58,11 @@ load_plan() {
 
     case "$PLAN" in
         default)
-            log "  GPU 0: Qwen3.6-27B    FP8 → :8000  统筹规划 + 多模态"
-            log "  GPU 1: Qwen3.6-35B-A3B BF16→ :8001  代码生成(MoE 35B→3B)"
-            log "  GPU 2: Qwen3.6-27B    FP8 → :8002  多模态 + 深度推理"
-            log "  GPU 3: FLUX.2 FP8          → :8188  图像生成(ComfyUI)"
-            log "  Aggregate: ~1,400 tok/s (text), concurrent ~87 @8K"
+            log "  GPU 0: Qwen3.6-27B    FP8 → :8000"
+            log "  GPU 1: Qwen3.6-35B-A3B BF16→ :8001 (MoE 35B→3B)"
+            log "  GPU 2: Qwen3.6-27B    FP8 → :8002"
+            log "  GPU 3: FLUX.2 FP8          → :8188 (ComfyUI)"
+            log "  Aggregate: ~504 tok/s (text), concurrent ~97 @8K"
             log "  Note: MoE runs BF16 — RTX 6000D shared memory (99KB) too small for FP8 Triton MoE kernels"
 
             INSTANCE_NAME[0]="gs-27b-coord"
@@ -68,27 +70,27 @@ load_plan() {
             INSTANCE_PORT[0]="8000"
             INSTANCE_MODEL[0]="${MODELS_BASE}/Qwen/Qwen3.6-27B"
             INSTANCE_TP[0]="1"
-            INSTANCE_EXTRA_ARGS[0]="$SHARED_ARGS --quantization fp8 --reasoning-parser qwen3 --served-model-name Qwen3.6-27B-FP8"
+            INSTANCE_EXTRA_ARGS[0]="$SHARED_ARGS --context-length 40960 --quantization fp8 --reasoning-parser qwen3 --served-model-name Qwen3.6-27B-FP8"
 
             INSTANCE_NAME[1]="gs-35b-moe-code"
             INSTANCE_GPUS[1]="1"
             INSTANCE_PORT[1]="8001"
             INSTANCE_MODEL[1]="${MODELS_BASE}/Qwen/Qwen3.6-35B-A3B"
             INSTANCE_TP[1]="1"
-            INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --cuda-graph-max-bs 4 --reasoning-parser qwen3 --served-model-name Qwen3.6-35B-A3B-FP8"
+            INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --context-length 32768 --cuda-graph-max-bs 4 --reasoning-parser qwen3 --served-model-name Qwen3.6-35B-A3B-FP8"
 
             INSTANCE_NAME[2]="gs-27b-multimodal"
             INSTANCE_GPUS[2]="2"
             INSTANCE_PORT[2]="8002"
             INSTANCE_MODEL[2]="${MODELS_BASE}/Qwen/Qwen3.6-27B"
             INSTANCE_TP[2]="1"
-            INSTANCE_EXTRA_ARGS[2]="$SHARED_ARGS --quantization fp8 --reasoning-parser qwen3 --served-model-name Qwen3.6-27B-FP8"
+            INSTANCE_EXTRA_ARGS[2]="$SHARED_ARGS --context-length 40960 --quantization fp8 --reasoning-parser qwen3 --served-model-name Qwen3.6-27B-FP8"
             ;;
 
         plan-72b)
-            log "  GPU 0,1: Qwen3-72B FP8 TP=2 → :8000  最强统筹"
-            log "  GPU 2:   Qwen3.6-27B FP8    → :8001  多模态 + 代码"
-            log "  GPU 3:   FLUX.2 FP8         → :8188  图像生成"
+            log "  GPU 0,1: Qwen3-72B FP8 TP=2 → :8000"
+            log "  GPU 2:   Qwen3.6-27B FP8    → :8001"
+            log "  GPU 3:   FLUX.2 FP8         → :8188 (ComfyUI)"
             log "  Requires: Qwen/Qwen3-72B downloaded"
 
             INSTANCE_NAME[0]="gs-72b-coord"
@@ -103,14 +105,14 @@ load_plan() {
             INSTANCE_PORT[1]="8001"
             INSTANCE_MODEL[1]="${MODELS_BASE}/Qwen/Qwen3.6-27B"
             INSTANCE_TP[1]="1"
-            INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --quantization fp8 --reasoning-parser qwen3 --served-model-name Qwen3.6-27B-FP8"
+            INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --context-length 40960 --quantization fp8 --reasoning-parser qwen3 --served-model-name Qwen3.6-27B-FP8"
             ;;
 
         plan-reasoning)
-            log "  GPU 0: R1-Distill-32B  FP8 → :8000  深度推理"
-            log "  GPU 1: Qwen3.6-35B-A3B BF16→ :8001  代码生成(MoE)"
-            log "  GPU 2: Qwen3.6-27B     FP8 → :8002  多模态 + QA"
-            log "  GPU 3: FLUX.2 FP8           → :8188  图像生成"
+            log "  GPU 0: R1-Distill-32B  FP8 → :8000"
+            log "  GPU 1: Qwen3.6-35B-A3B BF16→ :8001 (MoE)"
+            log "  GPU 2: Qwen3.6-27B     FP8 → :8002"
+            log "  GPU 3: FLUX.2 FP8           → :8188 (ComfyUI)"
             log "  Requires: deepseek-ai/DeepSeek-R1-Distill-Qwen-32B downloaded"
 
             INSTANCE_NAME[0]="gs-r1-reason"
@@ -118,21 +120,21 @@ load_plan() {
             INSTANCE_PORT[0]="8000"
             INSTANCE_MODEL[0]="${MODELS_BASE}/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
             INSTANCE_TP[0]="1"
-            INSTANCE_EXTRA_ARGS[0]="$SHARED_ARGS --quantization fp8 --context-length 65536 --served-model-name DeepSeek-R1-Distill-Qwen-32B-FP8"
+            INSTANCE_EXTRA_ARGS[0]="$SHARED_ARGS --context-length 65536 --quantization fp8 --served-model-name DeepSeek-R1-Distill-Qwen-32B-FP8"
 
             INSTANCE_NAME[1]="gs-35b-moe-code"
             INSTANCE_GPUS[1]="1"
             INSTANCE_PORT[1]="8001"
             INSTANCE_MODEL[1]="${MODELS_BASE}/Qwen/Qwen3.6-35B-A3B"
             INSTANCE_TP[1]="1"
-            INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --cuda-graph-max-bs 4 --reasoning-parser qwen3 --served-model-name Qwen3.6-35B-A3B-FP8"
+            INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --context-length 32768 --cuda-graph-max-bs 4 --reasoning-parser qwen3 --served-model-name Qwen3.6-35B-A3B-FP8"
 
             INSTANCE_NAME[2]="gs-27b-multimodal"
             INSTANCE_GPUS[2]="2"
             INSTANCE_PORT[2]="8002"
             INSTANCE_MODEL[2]="${MODELS_BASE}/Qwen/Qwen3.6-27B"
             INSTANCE_TP[2]="1"
-            INSTANCE_EXTRA_ARGS[2]="$SHARED_ARGS --quantization fp8 --reasoning-parser qwen3 --served-model-name Qwen3.6-27B-FP8"
+            INSTANCE_EXTRA_ARGS[2]="$SHARED_ARGS --context-length 40960 --quantization fp8 --reasoning-parser qwen3 --served-model-name Qwen3.6-27B-FP8"
             ;;
 
         *)
@@ -295,6 +297,57 @@ start_comfyui() {
         > /dev/null 2>&1
 }
 
+# ── Start Anthropic↔OpenAI translation proxy ──
+start_proxy() {
+    log ""
+    log "=== Starting API translation proxy ==="
+
+    local existing
+    existing=$(docker ps -q --filter "name=gs-proxy" 2>/dev/null)
+    [[ -n "$existing" ]] && docker stop "$existing" 2>/dev/null || true
+    existing=$(docker ps -q --filter "publish=$PROXY_PORT" 2>/dev/null)
+    if [[ -n "$existing" ]]; then
+        log "  Stopping existing container on port $PROXY_PORT..."
+        docker stop "$existing" 2>/dev/null || true
+    fi
+
+    # Build proxy image if not present
+    if ! docker image inspect "$PROXY_IMAGE" &>/dev/null; then
+        log "  Building proxy image..."
+        docker build -f "$SCRIPT_DIR/config/proxy.dockerfile" -t "$PROXY_IMAGE" "$REPO_ROOT" || {
+            log "  WARN: Proxy image build failed. Skipping proxy."
+            return 1
+        }
+    fi
+
+    # Build backend URLs for model routing
+    local backend_8000="http://localhost:8000/v1"
+    local backend_8001="http://localhost:8001/v1"
+    local backend_8002="http://localhost:8002/v1"
+    local default_backend="http://localhost:8000/v1"
+
+    # Adjust based on plan (plan-72b has different ports)
+    if [[ "$PLAN" == "plan-72b" ]]; then
+        backend_8001="http://localhost:8001/v1"  # 27B multimodal instead of MoE
+    elif [[ "$PLAN" == "plan-reasoning" ]]; then
+        backend_8000="http://localhost:8000/v1"  # R1-32B reasoning
+    fi
+
+    log "  Starting gs-proxy (port $PROXY_PORT)..."
+    docker run --rm -d \
+        --name "gs-proxy" \
+        --network host \
+        -e "BACKEND_8000=$backend_8000" \
+        -e "BACKEND_8001=$backend_8001" \
+        -e "BACKEND_8002=$backend_8002" \
+        -e "DEFAULT_BACKEND=$default_backend" \
+        -e "PROXY_PORT=$PROXY_PORT" \
+        "$PROXY_IMAGE" \
+        > /dev/null 2>&1
+
+    log "  Proxy started. Anthropic endpoint: http://localhost:$PROXY_PORT/v1/messages"
+}
+
 # ── Wait for all instances to be healthy ──
 wait_all() {
     log ""
@@ -368,15 +421,17 @@ print_status() {
     for i in "${!INSTANCE_NAME[@]}"; do
         local model_name
         model_name=$(basename "${INSTANCE_MODEL[$i]}")
-        local purpose=""
-        case "${INSTANCE_NAME[$i]}" in
-            *coord*)     purpose=" — 统筹规划 + 多模态" ;;
-            *moe*)       purpose=" — 代码生成(MoE 35B→3B)" ;;
-            *multimodal*) purpose=" — 多模态 + 深度推理" ;;
-            *reason*)    purpose=" — 深度推理(CoT)" ;;
-        esac
-        log "  http://localhost:${INSTANCE_PORT[$i]}/v1  ($model_name$purpose)"
+        log "  http://localhost:${INSTANCE_PORT[$i]}/v1  ($model_name)"
     done
+    log ""
+    log "API Translation Proxy (Anthropic + OpenAI, unified port):"
+    log "  http://localhost:$PROXY_PORT/v1/messages       (Anthropic Messages API)"
+    log "  http://localhost:$PROXY_PORT/v1/chat/completions (OpenAI passthrough)"
+    log "  Model routing (real names → backend):"
+    log "    Qwen3.6-27B-FP8        → :8000"
+    log "    Qwen3.6-35B-A3B-FP8    → :8001 (MoE)"
+    log "  Fuzzy: 35B/A3B/MoE → :8001 | 27B/72B/32B → :8000"
+    log "  Claude Code config: export ANTHROPIC_BASE_URL=http://localhost:$PROXY_PORT/v1"
     log ""
     log "Image Generation (ComfyUI API):"
     log "  http://localhost:8188/prompt  (POST workflow JSON)"
@@ -429,6 +484,7 @@ main() {
     smoke_all || { log "Smoke tests failed."; exit 1; }
 
     start_comfyui || log "  Image generation service skipped (ComfyUI unavailable)."
+    start_proxy || log "  Translation proxy skipped (build failed or unavailable)."
 
     write_stop_script
     print_status

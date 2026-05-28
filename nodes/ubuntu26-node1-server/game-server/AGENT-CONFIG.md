@@ -24,103 +24,300 @@ keeping critical coordination and creative direction on Claude's hosted models.
 ## Endpoint Topology
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                  ubuntu26-node1-server                    │
-│                                                          │
-│  GPU 0: Qwen3.6-27B FP8  ──→  :8000  Coordinator        │
-│  GPU 1: Qwen3.6-35B-A3B   ──→  :8001  Code Gen (MoE)    │
-│  GPU 2: Qwen3.6-27B FP8  ──→  :8002  Multimodal + QA    │
-│  GPU 3: FLUX.2 FP8        ──→  :8188  Image Gen (ComfyUI)│
-│                                                          │
-│  API: OpenAI-compatible /v1/chat/completions             │
-│  Image: ComfyUI REST API /prompt + /history              │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                       ubuntu26-node1-server                       │
+│                                                                   │
+│  GPU 0: Qwen3.6-27B FP8  ──→  :8000                              │
+│  GPU 1: Qwen3.6-35B-A3B   ──→  :8001  (MoE, BF16)                │
+│  GPU 2: Qwen3.6-27B FP8  ──→  :8002                              │
+│  GPU 3: FLUX.2 FP8        ──→  :8188  (ComfyUI)                   │
+│                                                                   │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │  Translation Proxy :8090                                     │ │
+│  │  /v1/messages          ← Anthropic SDK                       │ │
+│  │  /v1/chat/completions  ← OpenAI SDK (passthrough)            │ │
+│  │  Routes: claude-opus→:8000, claude-sonnet→:8001,             │ │
+│  │          claude-haiku→:8002                                  │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│                                                                   │
+│  API: OpenAI /v1/chat/completions + Anthropic /v1/messages       │
+│  Image: ComfyUI REST API /prompt + /history                       │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-All text endpoints expose an **OpenAI-compatible API** at `/v1/chat/completions`,
-making them drop-in compatible with any tool that supports custom OpenAI base URLs.
+All text endpoints expose an **OpenAI-compatible API** at `/v1/chat/completions`.
+The **translation proxy** at `:8090` adds **Anthropic Messages API** (`/v1/messages`)
+support. Both formats can be used simultaneously.
 
 ### Quick Reference
 
-| Port | Model | Quant | Tok/s (4 agents) | Best For |
-|------|-------|-------|---------------------|----------|
-| 8000 | Qwen3.6-27B | FP8 | 82.8 | Architecture review, coordination, multimodal |
-| 8001 | Qwen3.6-35B-A3B | BF16 | 338.1 | Code generation (4× faster than 27B) |
-| 8002 | Qwen3.6-27B | FP8 | 82.7 | Visual analysis, QA validation, reasoning |
-| 8188 | FLUX.2 FP8 | FP8m | — | Game art, sprites, concept renders |
+| Port | Service | Model | Quant | Tok/s (4 agents) | Characteristics |
+|------|---------|-------|-------|---------------------|-----------------|
+| 8000 | SGLang | Qwen3.6-27B | FP8 | 82.8 | Dense, full-param reasoning, multimodal |
+| 8001 | SGLang | Qwen3.6-35B-A3B | BF16 | 338.1 | MoE (35B→3B active), 4× throughput |
+| 8002 | SGLang | Qwen3.6-27B | FP8 | 82.7 | Dense, full-param reasoning, multimodal |
+| 8090 | Proxy | — (translates) | — | — | Anthropic + OpenAI unified port |
+| 8188 | ComfyUI | FLUX.2 FP8 | FP8m | — | Image generation |
 
-## CCGS Agent → Endpoint Mapping
+### Model Name Routing (Proxy)
 
-### Tier 1 — Directors (keep on Claude-hosted models)
+The proxy resolves model names with this priority:
+1. **Exact match** in the table below
+2. **Fuzzy match** — name contains `35B`/`A3B`/`MoE` → :8001; `27B`/`72B`/`32B` → :8000
+3. **Fallback** → :8000 (default)
 
-CCGS Tier 1 agents (creative-director, technical-director, producer) handle
-multi-document synthesis, creative vision, and high-stakes gate decisions.
-These benefit from Claude Opus's reasoning depth and should **remain on
-Anthropic-hosted models**. The local 27B models lack the context window and
-reasoning depth for director-level work.
+| Model Name | Routes To | Local Model | Use With |
+|------------|-----------|-------------|----------|
+| `Qwen3.6-27B-FP8` | :8000 | Qwen3.6-27B Dense | `ANTHROPIC_DEFAULT_OPUS_MODEL` |
+| `Qwen3.6-35B-A3B-FP8` | :8001 | Qwen3.6-35B-A3B MoE | `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL` |
+| `Qwen3-72B-FP8` | :8000 | Qwen3-72B Dense (plan-72b) | `ANTHROPIC_DEFAULT_OPUS_MODEL` |
+| `claude-opus-4-7` *(alias)* | :8000 | same as Qwen3.6-27B-FP8 | compatibility fallback |
+| `claude-sonnet-4-6` *(alias)* | :8001 | same as Qwen3.6-35B-A3B-FP8 | compatibility fallback |
+| `claude-haiku-4-5` *(alias)* | :8002 | Qwen3.6-27B Dense | compatibility fallback |
 
-### Tier 2 — Department Leads (hybrid)
+**Recommendation**: Use real model names (`Qwen3.6-27B-FP8`, `Qwen3.6-35B-A3B-FP8`)
+for Claude Code configuration. Anthropic aliases exist only for backward compatibility.
 
-Department leads can offload specific analyses to local endpoints while keeping
-judgment calls on Claude:
+## Routing Recommendations
 
-| CCGS Agent | Local Endpoint | Offload Task |
-|-----------|---------------|--------------|
-| lead-programmer | :8001 (MoE) | Code pattern analysis, boilerplate review |
-| game-designer | :8000 (27B) | GDD consistency checks, formula validation |
-| qa-lead | :8002 (27B) | Test plan generation, edge case enumeration |
-| art-director | :8188 (FLUX.2) | Style reference generation, mood board iteration |
+Role assignment is **not enforced at the infrastructure level**. All three text
+endpoints serve the same API and accept any prompt. Downstream consumers (CCGS
+agents, load balancers, orchestration scripts) decide which endpoint to call.
 
-### Tier 3 — Specialists (primary local-endpoint users)
+**Simple starting point:**
 
-These are the highest-volume agents and benefit most from local inference:
+- **Code-heavy tasks** → prefer `:8001` (MoE, 4× throughput, wider code knowledge)
+- **Design, analysis, multimodal** → any 27B endpoint (`:8000` or `:8002`)
+- **High concurrency** → use the proxy `:8090` with `least_conn` LB, or
+  distribute across all 3 endpoints
 
-#### Code Generation Agents → :8001 (MoE)
+Since `:8000` and `:8002` run identical models, treat them as **interchangeable
+capacity** — distribute load across both for higher throughput rather than
+reserving each for a specific role. CCGS Tier 1 director agents (creative-director,
+technical-director, producer) benefit from Anthropic-hosted Claude models for
+multi-document synthesis and high-stakes decisions; the local 27B models lack
+the context window and reasoning depth for director-level work.
+
+## Agent Granularity & Context Management
+
+The 32K context window is sufficient **only when agents are properly scoped**.
+The design principle: **don't let a single agent do too much at once.**
+
+### Context Budget per Agent Type
+
+| Agent Type | Typical Context | 32K Headroom | Strategy |
+|-----------|----------------|--------------|----------|
+| Code gen (single function/class) | 8–15K | Plenty | Direct implementation |
+| Design doc (one GDD section) | 10–18K | Comfortable | Single-focus authoring |
+| QA validation (read tests + code) | 10–16K | Comfortable | Focused review |
+| Architecture review (cross-file) | 18–28K | Tight | Summarize first, then decide |
+| Multi-file refactor (5+ files) | 25–32K+ | **At risk** | Split across agents |
+
+### Work-Splitting Pattern
+
+For tasks that exceed 32K, split across agents instead of forcing one agent to
+handle everything:
+
 ```
-gameplay-programmer, engine-programmer, ai-programmer,
-network-programmer, tools-programmer, ui-programmer,
-devops-engineer, security-engineer, performance-analyst,
-godot-specialist, godot-gdscript-specialist, godot-csharp-specialist,
-unity-specialist, unity-dots-specialist, ue-specialist
+❌ Wrong: One agent reads 8 files + writes 5 modifications → overflow
+✅ Right:
+  /architect-agent     → reads all files, writes a summary/plan (15K)
+  /programmer-agent-1  → implements group A based on the plan (12K)
+  /programmer-agent-2  → implements group B based on the plan (14K)
+  /qa-agent            → reviews final result against the plan (10K)
 ```
 
-The MoE model (338 tok/s) is 4× faster than the 27B Dense for code generation
-and provides 35B parameters of programming knowledge with only 3B activated
-per token — ideal for the high throughput demands of programming agents.
+The CCGS agent hierarchy naturally supports this:
+- **Tier 2 leads** read broad scope, produce focused specs
+- **Tier 3 specialists** execute narrow, well-defined changes
+- Each agent stays within 32K by design
 
-#### Design & Analysis Agents → :8000 (27B)
+### When Context Nears the Limit
+
+Signs that context is filling up (visible in Claude Code):
+
+- Compaction runs more frequently (messages summarized before you asked)
+- File content references start using truncated snippets
+- `/clear` needed more than once per session
+- Error: "Input is too long" from SGLang
+
+Mitigations, in priority order:
+
+1. **Narrow the task** — ask the agent to focus on one file/function at a time
+2. **Use a summary agent** — have one agent produce a condensed analysis, pass it to another
+3. **Start a fresh session** — `/clear` resets context, compaction keeps the critical parts
+4. **Split the work into separate Claude Code sessions** — different directories, different contexts
+5. **Route to a 40K-capable instance** — :8000 and :8002 support 40K context
+   (8K above Claude Code's 32K management target). Switch model to
+   `Qwen3.6-27B-FP8` for tasks that need the extra headroom.
+
+### Claude Code Configuration
+
+Configure Claude Code to route through the translation proxy. All model names
+use **real SGLang served-model-name values**, not Anthropic aliases.
+
+### Required Environment Variables
+
+```bash
+# API endpoint — must point to the proxy, NOT directly to SGLang
+export ANTHROPIC_BASE_URL="http://localhost:8090/v1"
+
+# API key — any non-empty string, proxy does not validate
+export ANTHROPIC_API_KEY="not-needed"
 ```
-systems-designer, economy-designer, ux-designer, level-designer,
-world-builder, prototyper, narrative-director, writer
+
+### Model Selection
+
+Map Claude Code's model roles to local models. All values use real model names
+that the proxy routes to appropriate backends:
+
+```bash
+# Opus role — complex multi-step reasoning, architecture decisions
+# Routes to :8000 (Qwen3.6-27B Dense, full-param reasoning)
+export ANTHROPIC_DEFAULT_OPUS_MODEL="Qwen3.6-27B-FP8"
+
+# Sonnet role — default for most tasks, balanced speed/quality
+# Routes to :8001 (Qwen3.6-35B-A3B MoE, 4× throughput)
+export ANTHROPIC_DEFAULT_SONNET_MODEL="Qwen3.6-35B-A3B-FP8"
+
+# Haiku role — lightweight tasks, subagents, compaction, background work
+# Routes to :8001 (MoE, fast turnaround)
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="Qwen3.6-35B-A3B-FP8"
 ```
 
-Design tasks require deep cross-document reasoning. The 27B Dense model's
-full-parameter activation per token provides better coherence for design
-documents than the MoE model.
+**How Claude Code uses these roles:**
 
-#### QA & Validation Agents → :8002 (27B)
+| Claude Code Role | When Used | Recommended Model |
+|------------------|-----------|-------------------|
+| Opus (`ANTHROPIC_DEFAULT_OPUS_MODEL`) | Complex reasoning, architecture decisions, `opusplan` plan phase | `Qwen3.6-27B-FP8` (Dense) |
+| Sonnet (`ANTHROPIC_DEFAULT_SONNET_MODEL`) | Default for most operations, `opusplan` execution phase | `Qwen3.6-35B-A3B-FP8` (MoE) |
+| Haiku (`ANTHROPIC_DEFAULT_HAIKU_MODEL`) | Subagents, compaction, quick lookups, background tasks | `Qwen3.6-35B-A3B-FP8` (MoE) |
+
+**Optional overrides:**
+
+```bash
+# Lock all operations to a single model (overrides role-specific settings)
+# export ANTHROPIC_MODEL="Qwen3.6-35B-A3B-FP8"
+
+# Override subagent model specifically
+# export CLAUDE_CODE_SUBAGENT_MODEL="Qwen3.6-35B-A3B-FP8"
 ```
-qa-tester, accessibility-specialist, analytics-engineer,
-live-ops-designer, community-manager
+
+### Model Capability Overrides
+
+Local models lack features that Claude's hosted models support. Disable them
+to prevent Claude Code from sending unsupported parameters:
+
+```bash
+# Extended thinking — NOT supported by Qwen/SGLang
+export CLAUDE_CODE_DISABLE_THINKING=1
+
+# Prompt caching — NOT supported by local endpoints
+export DISABLE_PROMPT_CACHING=1
+
+# Context window — local models use 32K, not 200K
+# Set to match --context-length from deploy.sh
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS=32768
 ```
 
-QA and validation are read-heavy tasks that benefit from the 27B's
-multimodal capability (screenshot review) and reasoning parser.
+### Optional: Display Names in /model Picker
 
-#### Visual/Creative Agents → :8188 (FLUX.2)
+Set friendly display names visible in Claude Code's `/model` selector:
+
+```bash
+export ANTHROPIC_DEFAULT_OPUS_MODEL_NAME="Qwen3.6 27B (Local GPU 0)"
+export ANTHROPIC_DEFAULT_SONNET_MODEL_NAME="Qwen3.6 35B MoE (Local GPU 1)"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME="Qwen3.6 35B MoE (Local GPU 1 - Fast)"
+
+# Declare supported capabilities (local models support none of these)
+export ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES=""
+export ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES=""
+export ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES=""
 ```
-art-director, technical-artist, sound-designer
+
+### Environment Variables NOT Needed
+
+These are unnecessary for local endpoints — do **not** set them:
+
+| Variable | Why Not Needed |
+|----------|---------------|
+| `ANTHROPIC_AUTH_TOKEN` | Proxy doesn't check Authorization header |
+| `ANTHROPIC_SMALL_FAST_MODEL` | **Deprecated** — use `ANTHROPIC_DEFAULT_HAIKU_MODEL` instead |
+| `ANTHROPIC_BEDROCK_BASE_URL` / `ANTHROPIC_VERTEX_BASE_URL` / `ANTHROPIC_FOUNDRY_BASE_URL` | Not using AWS Bedrock / GCP Vertex / Azure Foundry |
+| `CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX` / `CLAUDE_CODE_USE_FOUNDRY` | Not using third-party providers |
+| `ANTHROPIC_BETAS` | No beta features needed for local models |
+| `ANTHROPIC_EXTRA_BODY` | Proxy handles all translation |
+
+### Complete Configuration
+
+All essential vars in one block — add to `~/.bashrc` or a per-project `.env`:
+
+```bash
+# ── Endpoint ──
+export ANTHROPIC_BASE_URL="http://localhost:8090/v1"
+export ANTHROPIC_API_KEY="not-needed"
+
+# ── Model mapping (real model names) ──
+export ANTHROPIC_DEFAULT_OPUS_MODEL="Qwen3.6-27B-FP8"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="Qwen3.6-35B-A3B-FP8"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="Qwen3.6-35B-A3B-FP8"
+
+# ── Capability overrides ──
+export CLAUDE_CODE_DISABLE_THINKING=1
+export DISABLE_PROMPT_CACHING=1
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS=32768
+
+# ── Optional: friendly names ──
+export ANTHROPIC_DEFAULT_OPUS_MODEL_NAME="Qwen3.6 27B (Local)"
+export ANTHROPIC_DEFAULT_SONNET_MODEL_NAME="Qwen3.6 35B MoE (Local)"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME="Qwen3.6 35B MoE (Local - Fast)"
 ```
 
-FLUX.2 FP8 generates game-ready art assets via ComfyUI's REST API:
-sprites, textures, concept art, and UI mockups. The `/prompt` endpoint
-accepts standard ComfyUI workflow JSON.
+### Per-Project Configuration
 
-## Integration Patterns
+To configure per CCGS project instead of globally, add to the project's
+`.claude/settings.json`:
 
-### Pattern A: Direct API Calls
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:8090/v1",
+    "ANTHROPIC_API_KEY": "not-needed",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "Qwen3.6-27B-FP8",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "Qwen3.6-35B-A3B-FP8",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "Qwen3.6-35B-A3B-FP8",
+    "CLAUDE_CODE_DISABLE_THINKING": "1",
+    "DISABLE_PROMPT_CACHING": "1",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "32768"
+  }
+}
+```
 
-For ad-hoc use by individual agents, configure the OpenAI base URL:
+### Verification
+
+After configuration, verify Claude Code is routing through the proxy:
+
+```bash
+# Check which models Claude Code detects
+claude --model
+
+# Test with a simple prompt (non-interactive mode)
+echo "Say hello in one word." | claude -p --model Qwen3.6-35B-A3B-FP8
+
+# Or with role aliases
+echo "Say hello." | claude -p --model sonnet
+```
+
+The proxy logs each request to stdout — check Docker logs to confirm routing:
+```bash
+docker logs gs-proxy --tail 20
+```
+
+## SDK Integration Patterns
+
+For direct SDK usage (bypassing Claude Code), the proxy accepts both formats.
+
+### Pattern A: OpenAI SDK (Direct API Calls)
 
 ```python
 # Example: gameplay-programmer calls the MoE endpoint
@@ -183,47 +380,109 @@ fewest active connections. This is effective because the MoE endpoint
 (:8001) processes requests 4× faster and naturally receives more traffic.
 Access the unified endpoint at `http://localhost:8080/v1/chat/completions`.
 
-## Performance Budget per CCGS Workflow
+### Pattern D: Anthropic SDK (via Translation Proxy)
+
+Use the Anthropic Python SDK to call local endpoints through the translation proxy
+at `:8090`. The proxy translates Anthropic Messages API ↔ OpenAI Chat Completions
+transparently, including streaming and multimodal content.
+
+```python
+# Example: gameplay-programmer calls MoE endpoint via Anthropic SDK
+from anthropic import Anthropic
+
+client = Anthropic(
+    base_url="http://ubuntu26-node1-server:8090/v1",
+    api_key="not-needed",  # local endpoint, no auth
+)
+
+response = client.messages.create(
+    model="claude-sonnet-4-6",  # auto-routes to :8001 MoE
+    max_tokens=2048,
+    system="You are a gameplay programmer writing GDScript for Godot 4.",
+    messages=[
+        {"role": "user", "content": "Write an inventory system with drag-and-drop."}
+    ],
+)
+
+print(response.content[0].text)
+```
+
+**Streaming:**
+
+```python
+with client.messages.stream(
+    model="claude-opus-4-7",  # routes to :8000 coordinator
+    max_tokens=2048,
+    messages=[{"role": "user", "content": "Review this architecture..."}],
+) as stream:
+    for event in stream:
+        if event.type == "content_block_delta":
+            print(event.delta.text, end="", flush=True)
+```
+
+**Image understanding (multimodal):**
+
+```python
+import base64
+
+with open("game_screenshot.png", "rb") as f:
+    image_data = base64.b64encode(f.read()).decode()
+
+response = client.messages.create(
+    model="claude-haiku-4-5",  # routes to :8002 multimodal
+    max_tokens=1024,
+    messages=[{
+        "role": "user",
+        "content": [
+            {"type": "image", "source": {
+                "type": "base64", "media_type": "image/png", "data": image_data}},
+            {"type": "text", "text": "Describe the UI layout visible in this screenshot."}
+        ]
+    }],
+)
+```
+
+**Model routing — no code changes needed:**
+
+| Parameter | Routes To | Real Model |
+|-----------|-----------|------------|
+| `model="claude-opus-4-7"` | :8000 | Qwen3.6-27B FP8 |
+| `model="claude-sonnet-4-6"` | :8001 | Qwen3.6-35B-A3B MoE |
+| `model="claude-haiku-4-5"` | :8002 | Qwen3.6-27B FP8 |
+
+The proxy also supports **OpenAI passthrough** at `/v1/chat/completions`, so
+OpenAI SDK users can point to the same port `:8090` instead of individual
+service ports. Model name routing works identically for both formats.
+
+## Aggregate Capacity
 
 Measured at OSL=2048 with reasoning parser enabled (Qwen3 native format).
 
-### /design-system → :8000 + :8002 (27B Dense)
+| Resource | Model | Context Len | Throughput | Concurrent @8K |
+|----------|-------|------------|-----------|-----------------|
+| :8000 | Qwen3.6-27B FP8 | 40K | 82.8 tok/s | 29 |
+| :8001 | Qwen3.6-35B-A3B MoE BF16 | 32K | 338.1 tok/s | 39 |
+| :8002 | Qwen3.6-27B FP8 | 40K | 82.7 tok/s | 29 |
+| **Text total** | — | — | **~504 tok/s** | **97** |
+| :8188 | FLUX.2 FP8 | — | ~15-30s per 1024×1024 image | — |
 
-```
-Workload:  Design doc generation + cross-reference validation
-Throughput: 2 × 82.8 = ~166 tok/s combined
-Latency:   ~99s per 2048-token design section
-Capacity:  2 concurrent design agents comfortably
-```
+### Context Length Strategy
 
-### /create-epics + /dev-story → :8001 (MoE)
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS=32768` is deliberately configured **lower** than
+SGLang's `--context-length` (40K on 27B instances). This gives an **8K safety margin**:
 
-```
-Workload:  Code generation, boilerplate, implementation
-Throughput: 338 tok/s (4 agents concurrent)
-Latency:   ~24s per 2048-token code block
-Capacity:  4 concurrent programming agents at full speed
-Note:     MoE uses BF16 — limited KV cache (~13.6GB) but sufficient
-          for agent workloads at typical OSL=2048-4096
-```
+- Claude Code manages compaction to stay under 32K → normal operations unaffected
+- If compaction lags or a request spikes over 32K → SGLang still accepts it (up to 48K)
+- Result: no hard-fail 400 errors from borderline requests
 
-### /review-all-gdds → :8000 (27B)
+**Why MoE stays at 32K:** GPU 1 has only 13.6 GB KV cache (BF16 weights consume
+70 GB). 40K would reduce concurrency to ~1. Keep 32K for high-throughput short
+requests — code generation, the MoE's primary role.
 
-```
-Workload:  Multi-GDD cross-referencing, consistency checks
-Throughput: 82.8 tok/s (single agent)
-Latency:   ~99s per document analysis
-Note:     Deep reasoning benefits from Dense architecture
-```
-
-### Game Art Generation → :8188 (FLUX.2)
-
-```
-Workload:  Sprite sheets, concept art, UI mockups
-Latency:   ~15-30s per 1024×1024 image (FP8, 20-step Euler)
-Batch:     1-4 images per workflow submission
-API:       POST /prompt → poll /history/{id} → download image
-```
+The two 27B instances (:8000, :8002) are identical — treat them as a pool of
+~165 tok/s combined Dense capacity with 40K context headroom. For maximum
+throughput, distribute requests across all three text endpoints using the proxy
+at `:8090` with `least_conn` balancing.
 
 ## Deployment Commands
 

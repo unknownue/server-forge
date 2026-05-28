@@ -165,7 +165,10 @@ def openai_to_anthropic(oai_resp: dict, model: str) -> dict:
     usage = oai_resp.get("usage", {})
 
     blocks = []
-    text = msg.get("content", "")
+    reasoning = msg.get("reasoning_content") or ""
+    if reasoning:
+        blocks.append({"type": "thinking", "thinking": reasoning})
+    text = msg.get("content") or ""
     if text:
         blocks.append({"type": "text", "text": text})
 
@@ -199,114 +202,150 @@ def _sse_event(event: str, data: dict) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
 
 
-async def _translate_stream(oai_stream, model: str):
+async def _translate_stream(oai_resp, session, model: str):
+    oai_stream = oai_resp.content
     msg_id = f"msg_{int(time.time()*1000)}"
     started = False
+    thinking_started = False
+    text_started = False
+    thinking_idx = 0
     text_idx = 0
-    tool_idx_base = 1
-    current_tool_idx = -1
-    current_tool_id = ""
+    next_block_idx = 0
     active_tool_indices = {}  # tool_call index → (block_index, id, name)
     finish_reason = None
     output_tokens = 0
     input_tokens = 0
 
-    async for line in oai_stream:
-        raw = line.decode("utf-8") if isinstance(line, bytes) else line
+    try:
+        async for line in oai_stream:
+            raw = line.decode("utf-8") if isinstance(line, bytes) else line
 
-        if raw.startswith(":") or raw.strip() == "":
-            yield (raw if raw.endswith("\n") else raw + "\n").encode()
-            continue
+            if raw.startswith(":") or raw.strip() == "":
+                yield (raw if raw.endswith("\n") else raw + "\n").encode()
+                continue
 
-        if not raw.startswith("data: "):
-            continue
+            if not raw.startswith("data: "):
+                continue
 
-        payload = raw[6:].strip()
-        if payload == "[DONE]":
-            continue
+            payload = raw[6:].strip()
+            if payload == "[DONE]":
+                continue
 
-        try:
-            chunk = json.loads(payload)
-        except json.JSONDecodeError:
-            continue
+            try:
+                chunk = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
 
-        choices = chunk.get("choices", [{}])
-        choice = choices[0] if choices else {}
-        delta = choice.get("delta", {})
-        finish_reason = choice.get("finish_reason") or finish_reason
+            choices = chunk.get("choices", [{}])
+            choice = choices[0] if choices else {}
+            delta = choice.get("delta", {})
+            finish_reason = choice.get("finish_reason") or finish_reason
 
-        # usage snapshot (arrives in final chunk)
-        u = chunk.get("usage", {})
-        if u:
-            input_tokens = u.get("prompt_tokens", input_tokens)
-            output_tokens = u.get("completion_tokens", output_tokens)
+            # usage snapshot (arrives in final chunk)
+            u = chunk.get("usage", {})
+            if u:
+                input_tokens = u.get("prompt_tokens", input_tokens)
+                output_tokens = u.get("completion_tokens", output_tokens)
 
-        # ── message_start (first chunk only) ──
-        if not started:
-            started = True
-            yield _sse_event("message_start", {
-                "type": "message_start",
-                "message": {"id": msg_id, "type": "message", "role": "assistant",
-                            "content": [], "model": model,
-                            "usage": {"input_tokens": 0, "output_tokens": 0}}
-            })
-            # text content block start
-            yield _sse_event("content_block_start", {
-                "type": "content_block_start", "index": text_idx,
-                "content_block": {"type": "text", "text": ""}
-            })
-            yield _sse_event("ping", {"type": "ping"})
+            # ── message_start (first chunk only) ──
+            if not started:
+                started = True
+                yield _sse_event("message_start", {
+                    "type": "message_start",
+                    "message": {"id": msg_id, "type": "message", "role": "assistant",
+                                "content": [], "model": model,
+                                "usage": {"input_tokens": 0, "output_tokens": 0}}
+                })
+                yield _sse_event("ping", {"type": "ping"})
 
-        # ── text delta ──
-        text_delta = delta.get("content", "")
-        if text_delta:
-            yield _sse_event("content_block_delta", {
-                "type": "content_block_delta", "index": text_idx,
-                "delta": {"type": "text_delta", "text": text_delta}
-            })
-
-        # ── tool call deltas ──
-        for tc in delta.get("tool_calls", []) or []:
-            tc_index = tc.get("index", 0)
-            tc_id = tc.get("id", "")
-            tc_name = tc.get("function", {}).get("name", "")
-            tc_args = tc.get("function", {}).get("arguments", "")
-
-            if tc_index not in active_tool_indices:
-                block_idx = tool_idx_base + len(active_tool_indices)
-                active_tool_indices[tc_index] = (block_idx, tc_id, tc_name)
+            # ── reasoning delta ──
+            reasoning_delta = delta.get("reasoning_content") or ""
+            if reasoning_delta and not thinking_started:
+                thinking_started = True
+                thinking_idx = next_block_idx
+                next_block_idx += 1
                 yield _sse_event("content_block_start", {
-                    "type": "content_block_start", "index": block_idx,
-                    "content_block": {"type": "tool_use", "id": tc_id,
-                                      "name": tc_name, "input": {}}
+                    "type": "content_block_start", "index": thinking_idx,
+                    "content_block": {"type": "thinking", "thinking": ""}
                 })
-
-            if tc_args:
-                block_idx = active_tool_indices[tc_index][0]
+            if reasoning_delta:
                 yield _sse_event("content_block_delta", {
-                    "type": "content_block_delta", "index": block_idx,
-                    "delta": {"type": "input_json_delta", "partial_json": tc_args}
+                    "type": "content_block_delta", "index": thinking_idx,
+                    "delta": {"type": "thinking_delta", "thinking": reasoning_delta}
                 })
 
-        # ── finish: content_block_stop + message_delta ──
-        if finish_reason and delta == {}:
-            # stop text block
-            yield _sse_event("content_block_stop", {
-                "type": "content_block_stop", "index": text_idx
-            })
-            # stop tool blocks
-            for tc_i in sorted(active_tool_indices.keys()):
-                yield _sse_event("content_block_stop", {
-                    "type": "content_block_stop",
-                    "index": active_tool_indices[tc_i][0]
+            # ── text delta ──
+            text_delta = delta.get("content") or ""
+            if text_delta and not text_started:
+                if thinking_started:
+                    yield _sse_event("content_block_stop", {
+                        "type": "content_block_stop", "index": thinking_idx
+                    })
+                text_started = True
+                text_idx = next_block_idx
+                next_block_idx += 1
+                yield _sse_event("content_block_start", {
+                    "type": "content_block_start", "index": text_idx,
+                    "content_block": {"type": "text", "text": ""}
                 })
-            # message_delta
-            yield _sse_event("message_delta", {
-                "type": "message_delta",
-                "delta": {"stop_reason": FINISH_MAP.get(finish_reason, "end_turn"),
-                          "stop_sequence": None},
-                "usage": {"output_tokens": output_tokens or 0}
-            })
+            if text_delta:
+                yield _sse_event("content_block_delta", {
+                    "type": "content_block_delta", "index": text_idx,
+                    "delta": {"type": "text_delta", "text": text_delta}
+                })
+
+            # ── tool call deltas ──
+            for tc in delta.get("tool_calls", []) or []:
+                tc_index = tc.get("index", 0)
+                tc_id = tc.get("id", "")
+                tc_name = tc.get("function", {}).get("name", "")
+                tc_args = tc.get("function", {}).get("arguments", "")
+
+                if tc_index not in active_tool_indices:
+                    block_idx = next_block_idx
+                    next_block_idx += 1
+                    active_tool_indices[tc_index] = (block_idx, tc_id, tc_name)
+                    yield _sse_event("content_block_start", {
+                        "type": "content_block_start", "index": block_idx,
+                        "content_block": {"type": "tool_use", "id": tc_id,
+                                          "name": tc_name, "input": {}}
+                    })
+
+                if tc_args:
+                    block_idx = active_tool_indices[tc_index][0]
+                    yield _sse_event("content_block_delta", {
+                        "type": "content_block_delta", "index": block_idx,
+                        "delta": {"type": "input_json_delta", "partial_json": tc_args}
+                    })
+
+            # ── finish: content_block_stop + message_delta ──
+            if finish_reason and not any(v for v in delta.values() if v):
+                if thinking_started:
+                    yield _sse_event("content_block_stop", {
+                        "type": "content_block_stop", "index": thinking_idx
+                    })
+                if text_started:
+                    yield _sse_event("content_block_stop", {
+                        "type": "content_block_stop", "index": text_idx
+                    })
+                # stop tool blocks
+                for tc_i in sorted(active_tool_indices.keys()):
+                    yield _sse_event("content_block_stop", {
+                        "type": "content_block_stop",
+                        "index": active_tool_indices[tc_i][0]
+                    })
+                # message_delta
+                yield _sse_event("message_delta", {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": FINISH_MAP.get(finish_reason, "end_turn"),
+                              "stop_sequence": None},
+                    "usage": {"output_tokens": output_tokens or 0}
+                })
+    except Exception:
+        pass
+    finally:
+        oai_resp.release()
+        await session.close()
 
     # ── message_stop (always sent at end of stream) ──
     yield _sse_event("message_stop", {"type": "message_stop"})
@@ -327,31 +366,45 @@ async def handle_messages(request: web.Request):
 
     oai_body, backend = anthropic_to_openai(body)
     stream = body.get("stream", False)
+    session = ClientSession(timeout=TIMEOUT)
 
-    async with ClientSession(timeout=TIMEOUT) as session:
-        try:
-            async with session.post(f"{backend}/chat/completions", json=oai_body) as resp:
-                if resp.status != 200:
-                    err = await resp.text()
-                    return web.json_response({
-                        "type": "error",
-                        "error": {"type": "api_error",
-                                  "message": f"Backend {resp.status}: {err[:500]}"}
-                    }, status=502)
-
-                if stream:
-                    return web.Response(
-                        body=_translate_stream(resp.content, body.get("model", "")),
-                        headers={"Content-Type": "text/event-stream",
-                                 "Cache-Control": "no-cache",
-                                 "Connection": "keep-alive"},
-                    )
-                return web.json_response(openai_to_anthropic(await resp.json(), body.get("model", "")))
-        except asyncio.TimeoutError:
+    try:
+        resp = await session.post(f"{backend}/chat/completions", json=oai_body)
+        if resp.status != 200:
+            err = await resp.text()
+            resp.release()
+            await session.close()
             return web.json_response({
                 "type": "error",
-                "error": {"type": "timeout_error", "message": "Backend timeout"}
-            }, status=504)
+                "error": {"type": "api_error",
+                          "message": f"Backend {resp.status}: {err[:500]}"}
+            }, status=502)
+
+        if stream:
+            return web.Response(
+                body=_translate_stream(resp, session, body.get("model", "")),
+                headers={"Content-Type": "text/event-stream",
+                         "Cache-Control": "no-cache",
+                         "Connection": "keep-alive"},
+            )
+        data = await resp.json()
+        resp.release()
+        await session.close()
+        return web.json_response(openai_to_anthropic(data, body.get("model", "")))
+    except asyncio.TimeoutError:
+        await session.close()
+        return web.json_response({
+            "type": "error",
+            "error": {"type": "timeout_error", "message": "Backend timeout"}
+        }, status=504)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        await session.close()
+        return web.json_response({
+            "type": "error",
+            "error": {"type": "api_error", "message": f"Proxy error: {e}"}
+        }, status=500)
 
 
 async def handle_openai(request: web.Request):
@@ -361,15 +414,25 @@ async def handle_openai(request: web.Request):
     backend = resolve_backend(model)
     stream = body.get("stream", False)
 
-    async with ClientSession(timeout=TIMEOUT) as session:
-        async with session.post(f"{backend}/chat/completions", json=body) as resp:
-            if stream:
-                return web.Response(
-                    body=resp.content,
-                    headers={"Content-Type": "text/event-stream",
-                             "Cache-Control": "no-cache"},
-                )
-            return web.json_response(await resp.json())
+    session = ClientSession(timeout=TIMEOUT)
+    resp = await session.post(f"{backend}/chat/completions", json=body)
+    if stream:
+        async def _passthrough():
+            try:
+                async for line in resp.content:
+                    yield line
+            finally:
+                resp.release()
+                await session.close()
+        return web.Response(
+            body=_passthrough(),
+            headers={"Content-Type": "text/event-stream",
+                     "Cache-Control": "no-cache"},
+        )
+    data = await resp.json()
+    resp.release()
+    await session.close()
+    return web.json_response(data)
 
 
 async def handle_models(request: web.Request):

@@ -63,6 +63,10 @@ Reference: [Level1Techs P2P NCCL Fix](https://forum.level1techs.com/t/dual-rtx-p
 - `compute` — runs AI training workloads via Docker + NVIDIA Container Toolkit
 - `display-mixed` — heterogeneous GPU setup (compute + display)
 
+## Related Projects
+
+- [rtx6kpro](https://github.com/local-inference-lab/rtx6kpro) — RTX 6000 Pro Blackwell GPU tooling and reference
+
 ## Provisioning Log
 
 ### 1. OS Installation

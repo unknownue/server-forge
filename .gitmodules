@@ -7,3 +7,6 @@
 [submodule "submodules/Claude-Code-Game-Studios"]
 	path = submodules/Claude-Code-Game-Studios
 	url = https://github.com/Donchitos/Claude-Code-Game-Studios
+[submodule "submodules/rtx6kpro"]
+	path = submodules/rtx6kpro
+	url = https://github.com/local-inference-lab/rtx6kpro.git

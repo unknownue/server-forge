@@ -22,11 +22,54 @@ COMFYUI_IMAGE="yanwk/comfyui-boot:cu128-slim"
 PROXY_IMAGE="server-forge/anthropic-proxy:latest"
 PROXY_PORT="8090"
 CACHE_DIR="/data/cache/sglang_jit"
+MOE_CONFIG_DIR="$CACHE_DIR/moe_configs"
 COMFYUI_HOME="/data/cache/comfyui"
 FLUX_SRC_DIR="/data/work/models/Comfy-Org/flux2-dev/split_files"
 MODELS_BASE="/data/work/models"
 
 mkdir -p "$CACHE_DIR" "$COMFYUI_HOME"
+
+# ── Setup MoE kernel configs for RTX 6000D (Ada Lovelace, 99KB shared mem/SM) ──
+# Without these, the Triton fused MoE kernel crashes with OutOfResources under concurrent load.
+# Default config uses num_stages=4 → ~144KB shared memory, exceeding the 99KB hardware limit.
+setup_moe_configs() {
+    local configs_dir="$MOE_CONFIG_DIR/configs/triton_3_6_0"
+    local fp8_config="$configs_dir/E=256,N=512,device_name=NVIDIA_RTX_6000D,dtype=fp8_w8a8.json"
+    local fp8_down_config="${fp8_config%.json}_down.json"
+
+    if [[ -f "$fp8_config" ]] && [[ -f "$fp8_down_config" ]]; then
+        return 0
+    fi
+
+    mkdir -p "$configs_dir"
+
+    local config_json
+    config_json='{
+    "1": {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 2},
+    "2": {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 2},
+    "4": {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 16, "num_warps": 4, "num_stages": 2},
+    "8": {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 32, "num_warps": 4, "num_stages": 2},
+    "16": {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 256, "GROUP_SIZE_M": 32, "num_warps": 4, "num_stages": 2},
+    "24": {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 16, "num_warps": 4, "num_stages": 2},
+    "32": {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 32, "num_warps": 4, "num_stages": 2},
+    "48": {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 256, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 2},
+    "64": {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 256, "GROUP_SIZE_M": 16, "num_warps": 4, "num_stages": 2},
+    "96": {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 256, "GROUP_SIZE_M": 32, "num_warps": 4, "num_stages": 2},
+    "128": {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 16, "num_warps": 4, "num_stages": 2},
+    "256": {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 32, "num_warps": 4, "num_stages": 2},
+    "512": {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 256, "GROUP_SIZE_M": 16, "num_warps": 4, "num_stages": 2},
+    "1024": {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 256, "GROUP_SIZE_M": 32, "num_warps": 4, "num_stages": 2},
+    "1536": {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 16, "num_warps": 4, "num_stages": 2},
+    "2048": {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 32, "num_warps": 4, "num_stages": 2},
+    "3072": {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 16, "num_warps": 4, "num_stages": 2},
+    "4096": {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 2}
+}'
+    echo "$config_json" > "$fp8_config"
+    echo "$config_json" > "$fp8_down_config"
+    log "  MoE kernel configs initialized."
+}
+
+setup_moe_configs
 
 declare -A INSTANCE_NAME INSTANCE_GPUS INSTANCE_PORT INSTANCE_MODEL INSTANCE_TP INSTANCE_EXTRA_ARGS
 
@@ -59,12 +102,11 @@ load_plan() {
     case "$PLAN" in
         default)
             log "  GPU 0: Qwen3.6-27B    FP8 → :8000"
-            log "  GPU 1: Qwen3.6-35B-A3B BF16→ :8001 (MoE 35B→3B)"
+            log "  GPU 1: Qwen3.6-35B-A3B FP8 → :8001 (MoE 35B→3B, tuned kernel config)"
             log "  GPU 2: Qwen3.6-27B    FP8 → :8002"
             log "  GPU 3: FLUX.2 FP8          → :8188 (ComfyUI)"
-            log "  Aggregate: ~504 tok/s (text), concurrent ~97 @8K"
-            log "  Note: MoE runs BF16 — RTX 6000D shared memory (99KB) too small for FP8 Triton MoE kernels"
-
+            log "  Aggregate: ~484 tok/s (text), concurrent ~97 @8K"
+            
             INSTANCE_NAME[0]="gs-27b-coord"
             INSTANCE_GPUS[0]="0"
             INSTANCE_PORT[0]="8000"
@@ -77,7 +119,7 @@ load_plan() {
             INSTANCE_PORT[1]="8001"
             INSTANCE_MODEL[1]="${MODELS_BASE}/Qwen/Qwen3.6-35B-A3B"
             INSTANCE_TP[1]="1"
-            INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --context-length 32768 --cuda-graph-max-bs 4 --reasoning-parser qwen3 --served-model-name Qwen3.6-35B-A3B-FP8"
+            INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --context-length 32768 --quantization fp8 --cuda-graph-max-bs 8 --max-running-requests 8 --reasoning-parser qwen3 --served-model-name Qwen3.6-35B-A3B-FP8"
 
             INSTANCE_NAME[2]="gs-27b-multimodal"
             INSTANCE_GPUS[2]="2"
@@ -110,7 +152,7 @@ load_plan() {
 
         plan-reasoning)
             log "  GPU 0: R1-Distill-32B  FP8 → :8000"
-            log "  GPU 1: Qwen3.6-35B-A3B BF16→ :8001 (MoE)"
+            log "  GPU 1: Qwen3.6-35B-A3B FP8 → :8001 (MoE, tuned kernel config)"
             log "  GPU 2: Qwen3.6-27B     FP8 → :8002"
             log "  GPU 3: FLUX.2 FP8           → :8188 (ComfyUI)"
             log "  Requires: deepseek-ai/DeepSeek-R1-Distill-Qwen-32B downloaded"
@@ -127,7 +169,7 @@ load_plan() {
             INSTANCE_PORT[1]="8001"
             INSTANCE_MODEL[1]="${MODELS_BASE}/Qwen/Qwen3.6-35B-A3B"
             INSTANCE_TP[1]="1"
-            INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --context-length 32768 --cuda-graph-max-bs 4 --reasoning-parser qwen3 --served-model-name Qwen3.6-35B-A3B-FP8"
+            INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --context-length 32768 --quantization fp8 --cuda-graph-max-bs 8 --max-running-requests 8 --reasoning-parser qwen3 --served-model-name Qwen3.6-35B-A3B-FP8"
 
             INSTANCE_NAME[2]="gs-27b-multimodal"
             INSTANCE_GPUS[2]="2"
@@ -225,6 +267,8 @@ start_instance() {
         -p "$port:8000" \
         -v "$model:/models:ro" \
         -v "$CACHE_DIR:/cache:rw" \
+        -v "$MOE_CONFIG_DIR:/moe_configs:ro" \
+        -e "SGLANG_MOE_CONFIG_DIR=/moe_configs" \
         "$SGLANG_IMAGE" \
         bash -c "sglang serve $extra_args --model-path /models --tp-size $tp" \
         > /dev/null 2>&1

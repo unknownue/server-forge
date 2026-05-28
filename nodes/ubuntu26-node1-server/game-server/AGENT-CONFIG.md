@@ -1,6 +1,6 @@
 # Agent Inference Configuration — Claude Code Game Studios Deployment Guide
 
-**Date**: 2026-05-27
+**Date**: 2026-05-29
 **Target**: ubuntu26-node1-server (4× RTX 6000D 85.6GB)
 **Context**: [Claude Code Game Studios](https://github.com/Donchitos/Claude-Code-Game-Studios) (CCGS) —
 49-agent game development studio template for Claude Code.
@@ -28,7 +28,7 @@ keeping critical coordination and creative direction on Claude's hosted models.
 │                       ubuntu26-node1-server                       │
 │                                                                   │
 │  GPU 0: Qwen3.6-27B FP8  ──→  :8000                              │
-│  GPU 1: Qwen3.6-35B-A3B   ──→  :8001  (MoE, BF16)                │
+│  GPU 1: Qwen3.6-35B-A3B   ──→  :8001  (MoE, FP8)                 │
 │  GPU 2: Qwen3.6-27B FP8  ──→  :8002                              │
 │  GPU 3: FLUX.2 FP8        ──→  :8188  (ComfyUI)                   │
 │                                                                   │
@@ -54,7 +54,7 @@ support. Both formats can be used simultaneously.
 | Port | Service | Model | Quant | Tok/s (4 agents) | Characteristics |
 |------|---------|-------|-------|---------------------|-----------------|
 | 8000 | SGLang | Qwen3.6-27B | FP8 | 82.8 | Dense, full-param reasoning, multimodal |
-| 8001 | SGLang | Qwen3.6-35B-A3B | BF16 | 338.1 | MoE (35B→3B active), 4× throughput |
+| 8001 | SGLang | Qwen3.6-35B-A3B | FP8 | 695.7 | MoE (35B→3B active), 8× throughput |
 | 8002 | SGLang | Qwen3.6-27B | FP8 | 82.7 | Dense, full-param reasoning, multimodal |
 | 8090 | Proxy | — (translates) | — | — | Anthropic + OpenAI unified port |
 | 8188 | ComfyUI | FLUX.2 FP8 | FP8m | — | Image generation |
@@ -86,7 +86,7 @@ agents, load balancers, orchestration scripts) decide which endpoint to call.
 
 **Simple starting point:**
 
-- **Code-heavy tasks** → prefer `:8001` (MoE, 4× throughput, wider code knowledge)
+- **Code-heavy tasks** → prefer `:8001` (MoE, 8× throughput, wider code knowledge)
 - **Design, analysis, multimodal** → any 27B endpoint (`:8000` or `:8002`)
 - **High concurrency** → use the proxy `:8090` with `least_conn` LB, or
   distribute across all 3 endpoints
@@ -177,7 +177,7 @@ that the proxy routes to appropriate backends:
 export ANTHROPIC_DEFAULT_OPUS_MODEL="Qwen3.6-27B-FP8"
 
 # Sonnet role — default for most tasks, balanced speed/quality
-# Routes to :8001 (Qwen3.6-35B-A3B MoE, 4× throughput)
+# Routes to :8001 (Qwen3.6-35B-A3B MoE, 8× throughput)
 export ANTHROPIC_DEFAULT_SONNET_MODEL="Qwen3.6-35B-A3B-FP8"
 
 # Haiku role — lightweight tasks, subagents, compaction, background work
@@ -362,7 +362,7 @@ requests across all three text endpoints using `least_conn` balancing:
 upstream llm_backend {
     least_conn;
     server 127.0.0.1:8000;  # 27B FP8 Coordinator
-    server 127.0.0.1:8001;  # 35B-A3B BF16 MoE Code Gen
+    server 127.0.0.1:8001;  # 35B-A3B FP8 MoE Code Gen
     server 127.0.0.1:8002;  # 27B FP8 Multimodal QA
 }
 
@@ -377,7 +377,7 @@ server {
 
 The `least_conn` strategy routes new requests to the endpoint with the
 fewest active connections. This is effective because the MoE endpoint
-(:8001) processes requests 4× faster and naturally receives more traffic.
+(:8001) processes requests 8× faster and naturally receives more traffic.
 Access the unified endpoint at `http://localhost:8080/v1/chat/completions`.
 
 ### Pattern D: Anthropic SDK (via Translation Proxy)
@@ -461,9 +461,9 @@ Measured at OSL=2048 with reasoning parser enabled (Qwen3 native format).
 | Resource | Model | Context Len | Throughput | Concurrent @8K |
 |----------|-------|------------|-----------|-----------------|
 | :8000 | Qwen3.6-27B FP8 | 40K | 82.8 tok/s | 29 |
-| :8001 | Qwen3.6-35B-A3B MoE BF16 | 32K | 338.1 tok/s | 39 |
+| :8001 | Qwen3.6-35B-A3B MoE FP8 | 32K | 695.7 tok/s | 39 |
 | :8002 | Qwen3.6-27B FP8 | 40K | 82.7 tok/s | 29 |
-| **Text total** | — | — | **~504 tok/s** | **97** |
+| **Text total** | — | — | **~861 tok/s** | **97** |
 | :8188 | FLUX.2 FP8 | — | ~15-30s per 1024×1024 image | — |
 
 ### Context Length Strategy
@@ -475,9 +475,9 @@ SGLang's `--context-length` (40K on 27B instances). This gives an **8K safety ma
 - If compaction lags or a request spikes over 32K → SGLang still accepts it (up to 48K)
 - Result: no hard-fail 400 errors from borderline requests
 
-**Why MoE stays at 32K:** GPU 1 has only 13.6 GB KV cache (BF16 weights consume
-70 GB). 40K would reduce concurrency to ~1. Keep 32K for high-throughput short
-requests — code generation, the MoE's primary role.
+**Why MoE stays at 32K:** GPU 1 has 48.6 GB KV cache (FP8 weights consume 34.5 GB).
+32K keeps concurrency high (39 agents @8K). Code generation, the MoE's primary role,
+rarely needs >32K context.
 
 The two 27B instances (:8000, :8002) are identical — treat them as a pool of
 ~165 tok/s combined Dense capacity with 40K context headroom. For maximum
@@ -524,22 +524,22 @@ Downloads models to `/data/work/models/` with pinned revisions for reproducibili
 
 ## Hardware Constraints & Design Decisions
 
-### Why MoE is BF16 (not FP8)
+### Why MoE Uses a Tuned Kernel Config
 
-The RTX 6000D (Ada Lovelace AD102) has **99 KB shared memory per SM**.
-Triton's FP8 MoE kernels for Qwen3.6-35B-A3B require **144 KB shared memory**
-— a hardware incompatibility. The BF16 kernels fit within the 99 KB limit.
+Qwen3.6-35B-A3B FP8 runs on RTX 6000D (Ada Lovelace AD102, 99 KB shared memory/SM)
+via a manually tuned Triton kernel configuration. SGLang's default fused MoE config
+uses `num_stages=4`, which requires ~144 KB shared memory — exceeding the 99 KB limit.
 
-Attempted mitigations that failed:
-- `--moe-runner-backend cutlass`: requires block quantization (not available)
-- `--moe-runner-backend flashinfer_trtllm`: `use_ragged` attribute error
-- `--moe-runner-backend triton_kernel`: crashes during model loading
-- `--moe-runner-backend deep_gemm`: missing attribute in SGLang build
-- `TRITON_MAX_SHARED_MEMORY` env var: not a real Triton setting
+The fix: `num_stages=2` with conservative block sizes, deployed automatically by
+`deploy.sh` via `setup_moe_configs()`. Configs are mounted into the container at
+`/moe_configs` via `SGLANG_MOE_CONFIG_DIR`. See [MOE-FP8-MIGRATION.md](MOE-FP8-MIGRATION.md) for details.
 
-**Trade-off accepted**: MoE runs BF16, using ~70GB for weights (vs 35GB FP8),
-leaving ~13.6GB for KV cache. This is sufficient for agent workloads at
-OSL=2048–4096. The 4× throughput advantage over 27B Dense justifies the VRAM cost.
+Additionally, `--max-running-requests` must equal `--cuda-graph-max-bs` (both set to 8)
+to prevent the scheduler from forming batches that exceed the CUDA graph range, which
+would trigger a buggy eager-mode decode path (`'DecodeMetadata' object has no attribute 'use_ragged'`).
+
+**Result**: FP8 halves weight memory (70 GB → 34.5 GB), freeing ~35 GB for KV cache
+while roughly doubling throughput (338 → 696 tok/s at 8 concurrent agents).
 
 ### Page Size Must Be Auto (Not 64)
 

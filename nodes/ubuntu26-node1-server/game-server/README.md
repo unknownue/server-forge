@@ -11,7 +11,7 @@
 ## Overview
 
 Multi-model, multi-GPU inference service supporting Claude Code Agent Teams (49 agents).
-27B Dense models use FP8 runtime quantization. 35B-A3B MoE runs BF16 (hardware limitation, see below).
+27B Dense models use FP8 runtime quantization. 35B-A3B MoE runs FP8 with tuned kernel configs (see MOE-FP8-MIGRATION.md).
 Image generation via ComfyUI + FLUX.2 FP8 on dedicated GPU.
 
 | 能力 | 负责模型 | 状态 |
@@ -34,7 +34,7 @@ Instead, we use three capable models on GPUs 0-2:
 | GPU | Model | Type | Characteristics |
 |-----|-------|------|-----------------|
 | 0 | Qwen3.6-27B FP8 | Dense | Full-param reasoning, multimodal |
-| 1 | Qwen3.6-35B-A3B BF16 | MoE | 35B knowledge, 3B compute/token, 4× throughput |
+| 1 | Qwen3.6-35B-A3B FP8 | MoE | 35B knowledge, 3B compute/token, 4× throughput |
 | 2 | Qwen3.6-27B FP8 | Dense | Full-param reasoning, multimodal (identical to GPU 0) |
 
 GPUs 0 and 2 are **interchangeable** — both run the same 27B model. Distribute load
@@ -66,18 +66,18 @@ bash nodes/ubuntu26-node1-server/game-server/deploy.sh
 ```
 
 ```
-GPU 0: Qwen3.6-27B    FP8  TP=1 → :8000
-GPU 1: Qwen3.6-35B-A3B BF16 TP=1 → :8001 (MoE 35B→3B active)
-GPU 2: Qwen3.6-27B    FP8  TP=1 → :8002 (identical to GPU 0)
+GPU 0: Qwen3.6-27B    FP8 TP=1 → :8000
+GPU 1: Qwen3.6-35B-A3B FP8 TP=1 → :8001 (MoE 35B→3B active, tuned kernel config)
+GPU 2: Qwen3.6-27B    FP8 TP=1 → :8002 (identical to GPU 0)
 GPU 3: FLUX.2 FP8     ComfyUI   → :8188
 Proxy: anthropic-proxy  CPU     → :8090  Anthropic↔OpenAI
 ```
 
 | 指标 | 数值 |
 |------|------|
-| 总文本吞吐 | ~504 tok/s (2×82.8 + 338.1) |
+| 总文本吞吐 | ~861 tok/s (2×82.8 + 695.7) |
 | 27B (FP8) 吞吐 | 82.8 tok/s (4 agent 并发) |
-| 35B-A3B (BF16) 吞吐 | 338.1 tok/s (4 agent 并发, 4x 27B) |
+| 35B-A3B (FP8) 吞吐 | 695.7 tok/s (8 agent 并发) |
 | 图像生成 | ✅ :8188 |
 | API 格式 | ✅ OpenAI + Anthropic (via :8090 proxy) |
 
@@ -119,7 +119,7 @@ All numbers assume FP8 KV cache (`--kv-cache-dtype fp8_e5m2`).
 | Model | Params | FP8 Weights | KV Cache | KV/token(fp8) | Concurrent @8K |
 |-------|--------|------------|----------|---------------|-----------------|
 | Qwen3.6-27B | 27B Dense | 26 GB | 57.6 GB | 256 KB | 29 |
-| Qwen3.6-35B-A3B | 35B MoE (3B active) | 70 GB (BF16) | 13.6 GB | 256 KB | 39 |
+| Qwen3.6-35B-A3B | 35B MoE (3B active) | 34.5 GB (FP8) | 18.7 GB | 256 KB | 39 |
 | Qwen3-72B | 72B Dense | 72 GB (TP2) | 47.6 GB/each | 512 KB | 38 |
 | R1-Distill-32B | 32B Dense | 31 GB | 52.6 GB | 256 KB | 53 |
 
@@ -129,7 +129,7 @@ All numbers assume FP8 KV cache (`--kv-cache-dtype fp8_e5m2`).
                      Model Memory    KV Cache     Max Concurrent
                      per GPU         per GPU      @32K    @8K
 GPU 0: 27B  FP8      26.0 GB         57.6 GB       7      29
-GPU 1: 35B  FP8(MoE) 35.0 GB         48.6 GB      10      39
+GPU 1: 35B  FP8(MoE) 34.5 GB         48.6 GB      10      39
 GPU 2: 27B  FP8      26.0 GB         57.6 GB       7      29
 GPU 3: FLUX.2        50.0 GB         35.6 GB      —       —
 TOTAL (text)                                        24      97
@@ -242,9 +242,10 @@ bash nodes/ubuntu26-node1-server/game-server/test/compare-configs.sh full
 
 ## Design Decisions
 
-1. **FP8 runtime quantization** on Dense models — halves memory, doubles instance density.
-   MoE (35B-A3B) runs BF16: RTX 6000D has 99KB shared memory/SM, too small for Triton FP8
-   MoE kernels (require 144KB). BF16 kernels fit within the hardware limit.
+1. **FP8 runtime quantization** on all models — halves memory, doubles instance density.
+   MoE (35B-A3B) requires: (a) a tuned Triton kernel config (`num_stages=2`) to stay within
+   RTX 6000D's 99KB shared memory/SM limit, and (b) `--max-running-requests` set to match
+   `--cuda-graph-max-bs` to avoid the buggy eager-mode decode path. See [MOE-FP8-MIGRATION.md](MOE-FP8-MIGRATION.md).
 
 2. **No 4B models** — IDE tooling handles "fast" tasks better. Agent-quality code requires
    at minimum 27B-class models.
@@ -274,7 +275,7 @@ Measured with 4-agent concurrent simulation, OSL=2048, reasoning-parser qwen3.
 | Model | Config | GPUs | Output tok/s | Per-Agent | Success |
 |-------|--------|------|-------------|-----------|---------|
 | Qwen3.6-27B FP8 | TP=1 | 1 | 82.8 | 20.7 | 100% |
-| Qwen3.6-35B-A3B BF16 | TP=1, MoE | 1 | **338.1** | 84.5 | 100% |
+| Qwen3.6-35B-A3B FP8 | TP=1, MoE, max_running=8 | 1 | **695.7** | 87.0 | 100% |
 | Qwen3.6-27B FP8 | TP=1 | 1 | 82.7 | 20.7 | 100% |
 
 ### Historical Benchmarks

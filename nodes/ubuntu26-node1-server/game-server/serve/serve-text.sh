@@ -14,8 +14,8 @@
 #   # 27B Dense FP8 (coordinator or multimodal)
 #   bash serve-text.sh /data/work/models/Qwen/Qwen3.6-27B 0 8000 1 "--quantization fp8 --reasoning-parser qwen3"
 #
-#   # 35B-A3B MoE BF16 (code generation — RTX 6000D can't FP8-quantize Triton MoE kernels)
-#   bash serve-text.sh /data/work/models/Qwen/Qwen3.6-35B-A3B 1 8001 1 "--cuda-graph-max-bs 4 --reasoning-parser qwen3"
+#   # 35B-A3B MoE FP8 (code generation — requires tuned kernel config and max-running-requests)
+#   bash serve-text.sh /data/work/models/Qwen/Qwen3.6-35B-A3B 1 8001 1 "--quantization fp8 --cuda-graph-max-bs 8 --max-running-requests 8 --reasoning-parser qwen3"
 
 set -euo pipefail
 
@@ -90,6 +90,8 @@ docker run --rm -d \
     -p "$PORT:8000" \
     -v "$MODEL_DIR:/models:ro" \
     -v "$CACHE_DIR:/cache:rw" \
+    -v "$CACHE_DIR/moe_configs:/moe_configs:ro" \
+    -e "SGLANG_MOE_CONFIG_DIR=/moe_configs" \
     "$SGLANG_IMAGE" \
     sglang serve \
         --model-path "/models" \

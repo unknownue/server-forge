@@ -1,132 +1,117 @@
 # MoE FP8 Migration Guide
 
-**Date**: 2026-05-28
-**Status**: Pending — blocked by RTX 6000D shared memory hardware limitation
+**Date**: 2026-05-29
+**Status**: Resolved — tuned Triton kernel config created for RTX 6000D
 
-## Current State
+## Root Cause
 
-Qwen3.6-35B-A3B runs BF16 on GPU 1 because Triton's FP8 MoE kernels require
-**144 KB shared memory per SM**, but the RTX 6000D (Ada Lovelace AD102) only
-has **99 KB shared memory per SM**. The BF16 kernels fit within 99 KB.
+SGLang's fused MoE Triton kernel uses per-device tuned configurations stored as JSON files
+at `sglang/srt/layers/moe/fused_moe_triton/configs/triton_3_6_0/`. These configs specify
+block sizes, number of warps, and pipeline stages for the fused MoE kernel.
 
-This forces a suboptimal allocation:
+**No config existed for `NVIDIA_RTX_6000D` (Ada Lovelace AD102)**, so the kernel fell back
+to the default config:
+
+```json
+{"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128, "num_warps": 4, "num_stages": 4}
+```
+
+The `num_stages=4` parameter controls pipeline depth — it determines how many input tiles
+are prefetched into shared memory. The approximate shared memory formula is:
 
 ```
-GPU 1 (MoE BF16):  权重 70 GB + KV Cache 13.6 GB  ← KV Cache 严重不足
-GPU 0 (27B FP8):   权重 26 GB + KV Cache 57.6 GB  ← 充裕
-GPU 2 (27B FP8):   权重 26 GB + KV Cache 57.6 GB  ← 充裕
+SM ≈ num_stages × BLOCK_SIZE_K × (BLOCK_SIZE_M + BLOCK_SIZE_N) + BLOCK_SIZE_M × BLOCK_SIZE_N × 4 + overhead
+   ≈ 4 × 128 × (64 + 128) + 64 × 128 × 4 + ~16KB
+   ≈ 144KB
 ```
 
-Consequences:
-- `--context-length 32768` on MoE (vs 40960 on 27B) — non-uniform limits
-- Only ~1 concurrent request at 32K full — bottleneck for multi-agent workloads
-- Routing complexity: downstream must distinguish "long context → 27B" vs "short → MoE"
-- MoE's 4× throughput advantage underutilized because it can't handle enough concurrent requests
+RTX 6000D (Ada Lovelace AD102) has only **99 KB shared memory per SM** (reported as 101,376 bytes).
+This causes:
 
-## After FP8 Fix
+```
+triton.runtime.errors.OutOfResources: out of resource: shared memory,
+  Required: 147456, Hardware limit: 101376.
+```
 
-Once a compatible FP8 kernel becomes available (via SGLang update, Triton update,
-or driver fix), the MoE instance transforms:
+RTX PRO 6000 Blackwell has 228 KB shared memory, so the default config works there.
 
-| Metric | BF16 (current) | FP8 (fixed) | Change |
-|--------|---------------|-------------|--------|
-| Weights | 70 GB | 35 GB | -50% |
-| KV Cache pool | 13.6 GB | **48.6 GB** | +257% |
-| Concurrent @32K (max) | 1 | **5** | 5× |
-| Concurrent @8K (typical) | 6 | **24** | 4× |
-| Concurrent @4K (lightweight) | 12 | **48** | 4× |
+## Fix
 
-GPU 1's KV Cache pool becomes **48.6 GB**, comparable to the 27B instances
-(57.6 GB). The MoE is no longer the bottleneck.
+Created tuned kernel config files with `num_stages=2` and conservative block sizes
+that fit within the 99 KB shared memory limit. The configs are written to:
 
-## Deployment Changes
+```
+/data/cache/sglang_jit/moe_configs/configs/triton_3_6_0/
+├── E=256,N=512,device_name=NVIDIA_RTX_6000D,dtype=fp8_w8a8.json
+└── E=256,N=512,device_name=NVIDIA_RTX_6000D,dtype=fp8_w8a8_down.json
+```
 
-### Context-Length Options
+Key differences from default config:
+- `num_stages`: **2** (vs default 4) — halves pipeline buffer shared memory
+- `BLOCK_SIZE_M`: 16–128 (vs default 64) — smaller for low-batch, same for high-batch
+- `BLOCK_SIZE_N`: 64–128 (vs default 128) — smaller for most batch sizes
+- `BLOCK_SIZE_K`: 64–256 (vs default 128) — adaptive by batch size
 
-**Option A: Uniform 40K across all instances (recommended for simplicity)**
+The configs are mounted into the container via:
+```bash
+-v /data/cache/sglang_jit/moe_configs:/moe_configs:ro \
+-e SGLANG_MOE_CONFIG_DIR=/moe_configs
+```
+
+The `deploy.sh` script auto-generates these configs on first run via `setup_moe_configs()`.
+
+## Additional Issue: Eager-Mode Decode Bug
+
+After fixing the kernel config, disabling CUDA graphs entirely (`--disable-cuda-graph`)
+still failed because the eager-mode decode path in this SGLang version has a bug:
+
+```
+AttributeError: 'DecodeMetadata' object has no attribute 'use_ragged'
+```
+
+This means **CUDA graphs must be enabled** for the MoE model to function properly.
+To prevent the scheduler from forming batches larger than the CUDA graph supports
+(which would trigger the buggy eager fallback), `--max-running-requests` must be
+set equal to `--cuda-graph-max-bs`. This ensures all batches stay within the graph
+range and extra requests queue gracefully.
+
+## Results
+
+| Metric | BF16 (old) | FP8 (tuned config + max_running) |
+|--------|-----------|----------------------------------|
+| Weights | 70 GB | 34.5 GB |
+| KV Cache pool | ~13.6 GB | ~18.7 GB |
+| Concurrent @8K | 39 | 39 (same) |
+| Throughput (8 agents, max_bs=8) | 338.1 (4 agent) | **695.7 tok/s** |
+| Throughput (8 agents, max_bs=4) | — | 332.0 tok/s (queued) |
+| Stability @24 concurrent | — | 100% (queued, no crash) |
+
+FP8 with `--cuda-graph-max-bs 8 --max-running-requests 8` achieves ~700 tok/s, roughly
+double the BF16 throughput at 4 concurrent. The ~35 GB memory saving plus the larger
+CUDA graph batch size account for the improvement.
+
+## Deployment
+
+No manual steps required. `deploy.sh` automatically sets up the MoE kernel configs
+and mounts them into all SGLang containers. The MoE instance uses:
 
 ```bash
-# All three instances use the same context-length
-GPU 0: --context-length 40960  (27B FP8)
-GPU 1: --context-length 40960  (35B MoE FP8)  ← raised from 32768
-GPU 2: --context-length 40960  (27B FP8)
+--quantization fp8 --cuda-graph-max-bs 8 --max-running-requests 8 --reasoning-parser qwen3
 ```
 
-Benefit: three interchangeable instances, no routing complexity.
-Trade-off: MoE concurrency drops from ~5 to ~4 at max context (acceptable).
+The `--max-running-requests 8` flag is **critical for stability** — without it, the
+scheduler may form batches > 8, fall back to eager mode, and hit the `use_ragged` bug.
 
-**Option B: Keep 32K, maximize concurrency (recommended for throughput)**
+## Tuning for Other GPUs
 
-```bash
-GPU 0: --context-length 40960  (27B FP8, long context)
-GPU 1: --context-length 32768  (35B MoE FP8, high concurrency)  ← unchanged
-GPU 2: --context-length 40960  (27B FP8, long context)
+If deploying on a different GPU, either:
+1. Run SGLang's tuning tool: https://github.com/sgl-project/sglang/tree/main/benchmark/kernels/fused_moe_triton
+2. Or adapt the config in `deploy.sh:setup_moe_configs()` with:
+   - `device_name` set to the GPU model (spaces → underscores)
+   - `num_stages=2` (mandatory for Ada Lovelace, optional for Blackwell)
+   - Block sizes adjusted for your GPU's shared memory limit
+
+The config filename pattern is:
 ```
-
-Benefit: MoE gets 5× concurrency boost at 32K. 27B handles long context.
-Trade-off: non-uniform limits remain (but MoE is no longer a single-request bottleneck).
-
-### deploy.sh Changes Required
-
-In `load_plan()`, update GPU 1's `INSTANCE_EXTRA_ARGS`:
-
-```bash
-# Before (BF16):
-INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --context-length 32768 --cuda-graph-max-bs 4 \
-  --reasoning-parser qwen3 --served-model-name Qwen3.6-35B-A3B-FP8"
-
-# After (FP8):
-INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --context-length 40960 \
-  --quantization fp8 --reasoning-parser qwen3 --served-model-name Qwen3.6-35B-A3B-FP8"
-```
-
-Key changes:
-1. Add `--quantization fp8` (the fix enables this)
-2. Remove `--cuda-graph-max-bs 4` (FP8 kernel should not need this workaround)
-3. Context-length: 40960 (Option A) or keep 32768 (Option B)
-
-Also update the log message and comments:
-```bash
-log "  GPU 1: Qwen3.6-35B-A3B FP8→ :8001 (MoE 35B→3B)"  # was "BF16"
-log "  Note: MoE now runs FP8 — kernel compatibility resolved"
-```
-
-### Aggregate Capacity After Fix
-
-| Plan | Config | Total Throughput | 27B Pool Concurrency | MoE Concurrency |
-|------|--------|-----------------|---------------------|-----------------|
-| Current (BF16) | 2×27B FP8 + MoE BF16 | ~504 tok/s | 58 @8K | 39 @8K (limited by KV cache) |
-| After FP8 (40K) | 2×27B FP8 + MoE FP8 | ~504 tok/s | 58 @8K | **~45 @8K** (+15%) |
-| After FP8 (32K) | 2×27B FP8 + MoE FP8 | ~504 tok/s | 58 @8K | **~96 @8K** (+146%) |
-
-Throughput stays the same (~504 tok/s total) because FP8 quantization doesn't
-change the compute per token. The gains are purely in **concurrency** — more
-simultaneous requests without queuing.
-
-## When to Trigger
-
-Watch for these signals that the FP8 kernel issue is resolved:
-
-1. New SGLang image with updated Triton/CUTLASS MoE kernels
-2. NVIDIA driver update expanding shared memory limits (less likely)
-3. SGLang release notes mentioning "FP8 MoE support for Ada Lovelace"
-4. `--quantization fp8` succeeds on Qwen3.6-35B-A3B without crashes
-
-## Verification After Migration
-
-```bash
-# 1. Confirm FP8 loading
-docker logs ws-35b-moe-code 2>&1 | grep -i "fp8\|quantization"
-
-# 2. Verify KV cache allocation
-docker logs ws-35b-moe-code 2>&1 | grep -i "kv_cache\|gpu_memory"
-
-# 3. Smoke test with 32K context request
-curl http://localhost:8001/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"Qwen3.6-35B-A3B-FP8","messages":[{"role":"user","content":"..."}],"max_tokens":30720}'
-
-# 4. Verify concurrency improvement
-API_FORMAT=anthropic NUM_AGENTS=8 AGENT_REQUESTS=10 \
-  bash test/simulate-agents.sh http://localhost:8090
+E={num_experts},N={intermediate_size},device_name={GPU_NAME},dtype=fp8_w8a8.json
 ```

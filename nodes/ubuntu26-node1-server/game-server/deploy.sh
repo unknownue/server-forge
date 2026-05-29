@@ -100,18 +100,18 @@ load_plan() {
 
     case "$PLAN" in
         default)
-            log "  GPU 0: Qwen3.6-27B    FP8 → :8000"
+            log "  GPU 0: Qwen3.6-27B    FP8 → :8000 (80K long context)"
             log "  GPU 1: Qwen3.6-35B-A3B FP8 → :8001 (MoE 35B→3B, tuned kernel config)"
-            log "  GPU 2: Qwen3.6-27B    FP8 → :8002"
+            log "  GPU 2: Qwen3.6-27B    FP8 → :8002 (40K high concurrency)"
             log "  GPU 3: FLUX.2 FP8          → :8188 (ComfyUI)"
             log "  Aggregate: ~484 tok/s (text), concurrent ~97 @8K"
-            
-            INSTANCE_NAME[0]="gs-27b-coord"
+
+            INSTANCE_NAME[0]="gs-27b-long"
             INSTANCE_GPUS[0]="0"
             INSTANCE_PORT[0]="8000"
             INSTANCE_MODEL[0]="${MODELS_BASE}/Qwen/Qwen3.6-27B"
             INSTANCE_TP[0]="1"
-            INSTANCE_EXTRA_ARGS[0]="$SHARED_ARGS --context-length 40960 --quantization fp8 --reasoning-parser qwen3 --served-model-name Qwen3.6-27B-FP8"
+            INSTANCE_EXTRA_ARGS[0]="$SHARED_ARGS --context-length 81920 --quantization fp8 --max-running-requests 4 --reasoning-parser qwen3 --served-model-name Qwen3.6-27B-FP8-Long"
 
             INSTANCE_NAME[1]="gs-35b-moe-code"
             INSTANCE_GPUS[1]="1"
@@ -120,7 +120,7 @@ load_plan() {
             INSTANCE_TP[1]="1"
             INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --context-length 65536 --quantization fp8 --cuda-graph-max-bs 8 --max-running-requests 4 --reasoning-parser qwen3 --served-model-name Qwen3.6-35B-A3B-FP8"
 
-            INSTANCE_NAME[2]="gs-27b-multimodal"
+            INSTANCE_NAME[2]="gs-27b-fast"
             INSTANCE_GPUS[2]="2"
             INSTANCE_PORT[2]="8002"
             INSTANCE_MODEL[2]="${MODELS_BASE}/Qwen/Qwen3.6-27B"
@@ -141,7 +141,7 @@ load_plan() {
             INSTANCE_TP[0]="2"
             INSTANCE_EXTRA_ARGS[0]="$SHARED_ARGS --quantization fp8 --context-length 65536 --reasoning-parser qwen3 --served-model-name Qwen3-72B-FP8"
 
-            INSTANCE_NAME[1]="gs-27b-multimodal"
+            INSTANCE_NAME[1]="gs-27b-fast"
             INSTANCE_GPUS[1]="2"
             INSTANCE_PORT[1]="8001"
             INSTANCE_MODEL[1]="${MODELS_BASE}/Qwen/Qwen3.6-27B"
@@ -170,7 +170,7 @@ load_plan() {
             INSTANCE_TP[1]="1"
             INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --context-length 65536 --quantization fp8 --cuda-graph-max-bs 8 --max-running-requests 4 --reasoning-parser qwen3 --served-model-name Qwen3.6-35B-A3B-FP8"
 
-            INSTANCE_NAME[2]="gs-27b-multimodal"
+            INSTANCE_NAME[2]="gs-27b-fast"
             INSTANCE_GPUS[2]="2"
             INSTANCE_PORT[2]="8002"
             INSTANCE_MODEL[2]="${MODELS_BASE}/Qwen/Qwen3.6-27B"

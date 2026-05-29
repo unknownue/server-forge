@@ -27,27 +27,16 @@ keeping critical coordination and creative direction on Claude's hosted models.
 ┌──────────────────────────────────────────────────────────────────┐
 │                       ubuntu26-node1-server                       │
 │                                                                   │
-│  GPU 0: Qwen3.6-27B FP8  ──→  :8000                              │
-│  GPU 1: Qwen3.6-35B-A3B   ──→  :8001  (MoE, FP8)                 │
-│  GPU 2: Qwen3.6-27B FP8  ──→  :8002                              │
+│  GPU 0: Qwen3.6-27B FP8  ──→  :8000  (Anthropic + OpenAI)       │
+│  GPU 1: Qwen3.6-35B-A3B   ──→  :8001  (Anthropic + OpenAI, MoE)  │
+│  GPU 2: Qwen3.6-27B FP8  ──→  :8002  (Anthropic + OpenAI)       │
 │  GPU 3: FLUX.2 FP8        ──→  :8188  (ComfyUI)                   │
 │                                                                   │
-│  ┌─────────────────────────────────────────────────────────────┐ │
-│  │  Translation Proxy :8090                                     │ │
-│  │  /v1/messages          ← Anthropic SDK                       │ │
-│  │  /v1/chat/completions  ← OpenAI SDK (passthrough)            │ │
-│  │  Routes: claude-opus→:8000, claude-sonnet→:8001,             │ │
-│  │          claude-haiku→:8002                                  │ │
-│  └─────────────────────────────────────────────────────────────┘ │
-│                                                                   │
-│  API: OpenAI /v1/chat/completions + Anthropic /v1/messages       │
-│  Image: ComfyUI REST API /prompt + /history                       │
+│  All text endpoints serve both Anthropic /v1/messages and         │
+│  OpenAI /v1/chat/completions natively (SGLang built-in).          │
+│  No translation proxy needed.                                     │
 └──────────────────────────────────────────────────────────────────┘
 ```
-
-All text endpoints expose an **OpenAI-compatible API** at `/v1/chat/completions`.
-The **translation proxy** at `:8090` adds **Anthropic Messages API** (`/v1/messages`)
-support. Both formats can be used simultaneously.
 
 ### Quick Reference
 
@@ -56,27 +45,21 @@ support. Both formats can be used simultaneously.
 | 8000 | SGLang | Qwen3.6-27B | FP8 | 82.8 | Dense, full-param reasoning, multimodal |
 | 8001 | SGLang | Qwen3.6-35B-A3B | FP8 | 695.7 | MoE (35B→3B active), 8× throughput |
 | 8002 | SGLang | Qwen3.6-27B | FP8 | 82.7 | Dense, full-param reasoning, multimodal |
-| 8090 | Proxy | — (translates) | — | — | Anthropic + OpenAI unified port |
 | 8188 | ComfyUI | FLUX.2 FP8 | FP8m | — | Image generation |
 
-### Model Name Routing (Proxy)
+### Model Selection
 
-The proxy resolves model names with this priority:
-1. **Exact match** in the table below
-2. **Fuzzy match** — name contains `35B`/`A3B`/`MoE` → :8001; `27B`/`72B`/`32B` → :8000
-3. **Fallback** → :8000 (default)
+Each SGLang endpoint serves the model loaded on that GPU. To use a specific model,
+point `ANTHROPIC_BASE_URL` at the corresponding port:
 
-| Model Name | Routes To | Local Model | Use With |
-|------------|-----------|-------------|----------|
-| `Qwen3.6-27B-FP8` | :8000 | Qwen3.6-27B Dense | `ANTHROPIC_DEFAULT_OPUS_MODEL` |
-| `Qwen3.6-35B-A3B-FP8` | :8001 | Qwen3.6-35B-A3B MoE | `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL` |
-| `Qwen3-72B-FP8` | :8000 | Qwen3-72B Dense (plan-72b) | `ANTHROPIC_DEFAULT_OPUS_MODEL` |
-| `claude-opus-4-7` *(alias)* | :8000 | same as Qwen3.6-27B-FP8 | compatibility fallback |
-| `claude-sonnet-4-6` *(alias)* | :8001 | same as Qwen3.6-35B-A3B-FP8 | compatibility fallback |
-| `claude-haiku-4-5` *(alias)* | :8002 | Qwen3.6-27B Dense | compatibility fallback |
+| Endpoint | Model (served-model-name) | Best For |
+|----------|---------------------------|----------|
+| `http://localhost:8000` | `Qwen3.6-27B-FP8` | Reasoning, architecture, multimodal |
+| `http://localhost:8001` | `Qwen3.6-35B-A3B-FP8` | Code generation, high throughput (MoE) |
+| `http://localhost:8002` | `Qwen3.6-27B-FP8` | Reasoning, architecture, multimodal |
 
-**Recommendation**: Use real model names (`Qwen3.6-27B-FP8`, `Qwen3.6-35B-A3B-FP8`)
-for Claude Code configuration. Anthropic aliases exist only for backward compatibility.
+Set `ANTHROPIC_BASE_URL` to the endpoint serving your preferred model. All three
+endpoint URLs also work with the OpenAI SDK at `/v1/chat/completions`.
 
 ## Routing Recommendations
 
@@ -88,8 +71,7 @@ agents, load balancers, orchestration scripts) decide which endpoint to call.
 
 - **Code-heavy tasks** → prefer `:8001` (MoE, 8× throughput, wider code knowledge)
 - **Design, analysis, multimodal** → any 27B endpoint (`:8000` or `:8002`)
-- **High concurrency** → use the proxy `:8090` with `least_conn` LB, or
-  distribute across all 3 endpoints
+- **High concurrency** → distribute across all 3 endpoints
 
 Since `:8000` and `:8002` run identical models, treat them as **interchangeable
 capacity** — distribute load across both for higher throughput rather than
@@ -153,35 +135,49 @@ Mitigations, in priority order:
 
 ### Claude Code Configuration
 
-Configure Claude Code to route through the translation proxy. All model names
-use **real SGLang served-model-name values**, not Anthropic aliases.
+Configure Claude Code to talk directly to SGLang's native Anthropic Messages API
+(`/v1/messages`). No translation proxy needed — SGLang serves Anthropic format natively.
+
+SGLang requires two small patches for full Claude Code compatibility (see
+[config/sglang-patches/](config/sglang-patches/)): accept `role=system` in messages,
+merge system messages into the top-level `system` field, and skip `thinking` blocks
+in conversation history. `deploy.sh` mounts these patches automatically.
 
 ### Required Environment Variables
 
 ```bash
-# API endpoint — must point to the proxy, NOT directly to SGLang
-export ANTHROPIC_BASE_URL="http://localhost:8090/v1"
+# API endpoint — point directly at any SGLang instance (no /v1 suffix!)
+export ANTHROPIC_BASE_URL="http://localhost:8001"
 
-# API key — any non-empty string, proxy does not validate
+# API key — any non-empty string, SGLang does not validate
 export ANTHROPIC_API_KEY="not-needed"
 ```
 
 ### Model Selection
 
-Map Claude Code's model roles to local models. All values use real model names
-that the proxy routes to appropriate backends:
+Point ANTHROPIC_BASE_URL at the SGLang instance serving your preferred model.
+All three endpoints expose the same Anthropic API:
+
+| Endpoint | Model | Best For |
+|----------|-------|----------|
+| `http://localhost:8001` | Qwen3.6-35B-A3B-FP8 (MoE) | Code generation, high throughput |
+| `http://localhost:8000` | Qwen3.6-27B-FP8 | Reasoning, multimodal |
+| `http://localhost:8002` | Qwen3.6-27B-FP8 | Reasoning, multimodal |
+
+Model names use **SGLang served-model-name values** (the `--served-model-name` flag):
 
 ```bash
 # Opus role — complex multi-step reasoning, architecture decisions
-# Routes to :8000 (Qwen3.6-27B Dense, full-param reasoning)
+# Use a 27B Dense endpoint (:8000 or :8002)
 export ANTHROPIC_DEFAULT_OPUS_MODEL="Qwen3.6-27B-FP8"
 
 # Sonnet role — default for most tasks, balanced speed/quality
-# Routes to :8001 (Qwen3.6-35B-A3B MoE, 8× throughput)
+# Use the MoE endpoint (:8001) for speed
 export ANTHROPIC_DEFAULT_SONNET_MODEL="Qwen3.6-35B-A3B-FP8"
 
 # Haiku role — lightweight tasks, subagents, compaction, background work
-# Routes to :8001 (MoE, fast turnaround)
+# MoE for fast turnaround
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="Qwen3.6-35B-A3B-FP8"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="Qwen3.6-35B-A3B-FP8"
 ```
 
@@ -246,7 +242,7 @@ These are unnecessary for local endpoints — do **not** set them:
 | `ANTHROPIC_BEDROCK_BASE_URL` / `ANTHROPIC_VERTEX_BASE_URL` / `ANTHROPIC_FOUNDRY_BASE_URL` | Not using AWS Bedrock / GCP Vertex / Azure Foundry |
 | `CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX` / `CLAUDE_CODE_USE_FOUNDRY` | Not using third-party providers |
 | `ANTHROPIC_BETAS` | No beta features needed for local models |
-| `ANTHROPIC_EXTRA_BODY` | Proxy handles all translation |
+| `ANTHROPIC_EXTRA_BODY` | SGLang handles translation natively |
 
 ### Complete Configuration
 
@@ -254,7 +250,7 @@ All essential vars in one block — add to `~/.bashrc` or a per-project `.env`:
 
 ```bash
 # ── Endpoint ──
-export ANTHROPIC_BASE_URL="http://localhost:8090/v1"
+export ANTHROPIC_BASE_URL="http://localhost:8001"
 export ANTHROPIC_API_KEY="not-needed"
 
 # ── Model mapping (real model names) ──
@@ -281,7 +277,7 @@ To configure per CCGS project instead of globally, add to the project's
 ```json
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://localhost:8090/v1",
+    "ANTHROPIC_BASE_URL": "http://localhost:8001",
     "ANTHROPIC_API_KEY": "not-needed",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "Qwen3.6-27B-FP8",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "Qwen3.6-35B-A3B-FP8",
@@ -295,7 +291,7 @@ To configure per CCGS project instead of globally, add to the project's
 
 ### Verification
 
-After configuration, verify Claude Code is routing through the proxy:
+After configuration, verify Claude Code is routing directly to SGLang:
 
 ```bash
 # Check which models Claude Code detects
@@ -303,19 +299,16 @@ claude --model
 
 # Test with a simple prompt (non-interactive mode)
 echo "Say hello in one word." | claude -p --model Qwen3.6-35B-A3B-FP8
-
-# Or with role aliases
-echo "Say hello." | claude -p --model sonnet
 ```
 
-The proxy logs each request to stdout — check Docker logs to confirm routing:
+Check SGLang logs to confirm routing:
 ```bash
-docker logs gs-proxy --tail 20
+docker logs gs-35b-moe-code --tail 20
 ```
 
 ## SDK Integration Patterns
 
-For direct SDK usage (bypassing Claude Code), the proxy accepts both formats.
+For direct SDK usage (bypassing Claude Code), all SGLang endpoints serve both formats natively.
 
 ### Pattern A: OpenAI SDK (Direct API Calls)
 
@@ -361,9 +354,9 @@ requests across all three text endpoints using `least_conn` balancing:
 ```nginx
 upstream llm_backend {
     least_conn;
-    server 127.0.0.1:8000;  # 27B FP8 Coordinator
-    server 127.0.0.1:8001;  # 35B-A3B FP8 MoE Code Gen
-    server 127.0.0.1:8002;  # 27B FP8 Multimodal QA
+    server 127.0.0.1:8000;  # Qwen3.6-27B FP8
+    server 127.0.0.1:8001;  # Qwen3.6-35B-A3B FP8 MoE
+    server 127.0.0.1:8002;  # Qwen3.6-27B FP8
 }
 
 server {
@@ -382,16 +375,15 @@ Access the unified endpoint at `http://localhost:8080/v1/chat/completions`.
 
 ### Pattern D: Anthropic SDK (via Translation Proxy)
 
-Use the Anthropic Python SDK to call local endpoints through the translation proxy
-at `:8090`. The proxy translates Anthropic Messages API ↔ OpenAI Chat Completions
-transparently, including streaming and multimodal content.
+Use the Anthropic Python SDK to call SGLang endpoints directly.
+SGLang serves the Anthropic Messages API natively, including streaming and multimodal content.
 
 ```python
 # Example: gameplay-programmer calls MoE endpoint via Anthropic SDK
 from anthropic import Anthropic
 
 client = Anthropic(
-    base_url="http://ubuntu26-node1-server:8090/v1",
+    base_url="http://localhost:8001",
     api_key="not-needed",  # local endpoint, no auth
 )
 
@@ -450,9 +442,8 @@ response = client.messages.create(
 | `model="claude-sonnet-4-6"` | :8001 | Qwen3.6-35B-A3B MoE |
 | `model="claude-haiku-4-5"` | :8002 | Qwen3.6-27B FP8 |
 
-The proxy also supports **OpenAI passthrough** at `/v1/chat/completions`, so
-OpenAI SDK users can point to the same port `:8090` instead of individual
-service ports. Model name routing works identically for both formats.
+SGLang also serves **OpenAI `/v1/chat/completions`** on all text endpoints, so
+OpenAI SDK users can point to any port directly. Every endpoint serves both formats.
 
 ## Aggregate Capacity
 
@@ -481,8 +472,8 @@ rarely needs >32K context.
 
 The two 27B instances (:8000, :8002) are identical — treat them as a pool of
 ~165 tok/s combined Dense capacity with 40K context headroom. For maximum
-throughput, distribute requests across all three text endpoints using the proxy
-at `:8090` with `least_conn` balancing.
+throughput, distribute requests across all three text endpoints using
+`least_conn` load balancing (e.g. Nginx).
 
 ## Deployment Commands
 

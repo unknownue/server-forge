@@ -88,24 +88,9 @@ default:
         weights_gb: 50
         free_vram_gb: 35.6
 
-  api_proxy:
-    - name: "anthropic-proxy"
-      port: 8090
-      image: "server-forge/anthropic-proxy:latest"
-      purpose: "API format translation — Anthropic Messages API ↔ OpenAI Chat Completions"
-      runtime:
-        memory_mb: 100
-        cpu_cores: 0.1
-        gpu: false
-      routing:
-        claude-opus-4-7:   { target: "coordinator", port: 8000 }
-        claude-sonnet-4-6: { target: "code-generator-moe", port: 8001 }
-        claude-haiku-4-5:  { target: "multimodal-qa", port: 8002 }
-      endpoints:
-        - "/v1/messages          (Anthropic Messages API)"
-        - "/v1/chat/completions  (OpenAI passthrough)"
-        - "/v1/models            (Model discovery)"
-      note: "Runs on CPU — no GPU allocation needed. <1ms translation overhead."
+  # Anthropic /v1/messages is served natively by SGLang on each text endpoint.
+  # No translation proxy needed — all :8000/:8001/:8002 serve both API formats.
+  # See config/sglang-patches/ for minor SGLang protocol compatibility fixes.
 
 # ── Plan 72B: Strongest Coordinator ──
 plan_72b:

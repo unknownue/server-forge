@@ -18,7 +18,7 @@ Image generation via ComfyUI + FLUX.2 FP8 on dedicated GPU.
 |------|---------|------|
 | 文本推理 (×3) | Qwen3.6-27B FP8 + Qwen3.6-35B-A3B MoE | ✅ 已部署 |
 | 图像生成 | FLUX.2 FP8 via ComfyUI (GPU 3) | ✅ 已部署 |
-| API 格式翻译 | Anthropic↔OpenAI Proxy (:8090) | ✅ 已部署 |
+| Anthropic API | SGLang native /v1/messages (no proxy needed) | ✅ 已部署 |
 
 ## Why This Topology
 
@@ -66,12 +66,14 @@ bash nodes/ubuntu26-node1-server/game-server/deploy.sh
 ```
 
 ```
-GPU 0: Qwen3.6-27B    FP8 TP=1 → :8000
-GPU 1: Qwen3.6-35B-A3B FP8 TP=1 → :8001 (MoE 35B→3B active, tuned kernel config)
-GPU 2: Qwen3.6-27B    FP8 TP=1 → :8002 (identical to GPU 0)
+GPU 0: Qwen3.6-27B    FP8 TP=1 → :8000  (Anthropic + OpenAI)
+GPU 1: Qwen3.6-35B-A3B FP8 TP=1 → :8001  (Anthropic + OpenAI, MoE)
+GPU 2: Qwen3.6-27B    FP8 TP=1 → :8002  (Anthropic + OpenAI)
 GPU 3: FLUX.2 FP8     ComfyUI   → :8188
-Proxy: anthropic-proxy  CPU     → :8090  Anthropic↔OpenAI
 ```
+
+All text endpoints serve both Anthropic `/v1/messages` and OpenAI `/v1/chat/completions`
+natively — no translation proxy needed. See [AGENT-CONFIG.md](AGENT-CONFIG.md) for Claude Code setup.
 
 | 指标 | 数值 |
 |------|------|
@@ -79,7 +81,7 @@ Proxy: anthropic-proxy  CPU     → :8090  Anthropic↔OpenAI
 | 27B (FP8) 吞吐 | 82.8 tok/s (4 agent 并发) |
 | 35B-A3B (FP8) 吞吐 | 695.7 tok/s (8 agent 并发) |
 | 图像生成 | ✅ :8188 |
-| API 格式 | ✅ OpenAI + Anthropic (via :8090 proxy) |
+| API 格式 | ✅ Anthropic + OpenAI (SGLang native) |
 
 ### Alternative Plans
 
@@ -190,14 +192,14 @@ bind specific tasks to specific GPUs. All three text endpoints serve identical A
 | Endpoint | Model | Throughput | Typical Fit |
 |----------|-------|-----------|-------------|
 | :8000, :8002 | Qwen3.6-27B FP8 | 82.8 tok/s each | General purpose, design, analysis, multimodal |
-| :8001 | Qwen3.6-35B-A3B MoE | 338.1 tok/s | Code generation, high-throughput tasks |
+| :8001 | Qwen3.6-35B-A3B MoE | 695.7 tok/s | Code generation, high-throughput tasks |
 | :8188 | FLUX.2 FP8 | — | Image generation |
-| :8090 (proxy) | — | — | Unified entry, Anthropic + OpenAI formats |
+
+All text endpoints serve both Anthropic `/v1/messages` and OpenAI `/v1/chat/completions`.
 
 - :8000 and :8002 are **interchangeable** — distribute load across both
-- Prefer :8001 for code-heavy, high-volume work (4× throughput)
-- Tier 1 directors benefit from Anthropic-hosted Claude models
-- **Claude Code setup**: set `ANTHROPIC_BASE_URL=http://localhost:8090/v1` and
+- Prefer :8001 for code-heavy, high-volume work (8× throughput)
+- **Claude Code setup**: set `ANTHROPIC_BASE_URL=http://localhost:8001` and
   `ANTHROPIC_DEFAULT_SONNET_MODEL=Qwen3.6-35B-A3B-FP8` — full config in
   [AGENT-CONFIG.md](AGENT-CONFIG.md#claude-code-configuration)
 
@@ -215,10 +217,10 @@ curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"Qwen3.6-27B","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
 
-# 4. Test endpoints (Anthropic format, via proxy :8090)
-curl http://localhost:8090/v1/messages \
+# 4. Test endpoints (Anthropic format, SGLang native)
+curl http://localhost:8001/v1/messages \
   -H "Content-Type: application/json" \
-  -d '{"model":"claude-sonnet-4-6","max_tokens":32,"messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"Qwen3.6-35B-A3B-FP8","max_tokens":32,"messages":[{"role":"user","content":"Hello"}]}'
 
 # 5. Stop all services
 bash nodes/ubuntu26-node1-server/game-server/stop.sh
@@ -234,7 +236,7 @@ bash nodes/ubuntu26-node1-server/game-server/test/throughput-test.sh http://loca
 NUM_AGENTS=8 AGENT_REQUESTS=10 bash nodes/ubuntu26-node1-server/game-server/test/simulate-agents.sh http://localhost:8000
 
 # Multi-agent simulation (Anthropic format, through proxy)
-NUM_AGENTS=8 AGENT_REQUESTS=10 API_FORMAT=anthropic bash nodes/ubuntu26-node1-server/game-server/test/simulate-agents.sh http://localhost:8090
+NUM_AGENTS=8 AGENT_REQUESTS=10 API_FORMAT=anthropic bash nodes/ubuntu26-node1-server/game-server/test/simulate-agents.sh http://localhost:8001
 
 # Cross-plan comparison
 bash nodes/ubuntu26-node1-server/game-server/test/compare-configs.sh full
@@ -298,11 +300,10 @@ game-server/
 ├── config/
 │   ├── nginx-lb.template.conf   # Nginx load balancer template
 │   ├── services.yaml            # Service definitions and routing table
-│   └── proxy.dockerfile         # Anthropic↔OpenAI translation proxy image
+│   └── sglang-patches/          # SGLang Anthropic API patches
 ├── serve/
 │   ├── serve-text.sh            # Start single text model instance
-│   ├── serve-image-gen.sh       # ComfyUI + FLUX.2 FP8 launcher
-│   └── anthropic-proxy.py       # API translation proxy (Anthropic↔OpenAI)
+│   └── serve-image-gen.sh       # ComfyUI + FLUX.2 FP8 launcher
 ├── test/
 │   ├── throughput-test.sh       # AIPerf benchmark on single endpoint
 │   ├── simulate-agents.sh       # Multi-agent workload simulation

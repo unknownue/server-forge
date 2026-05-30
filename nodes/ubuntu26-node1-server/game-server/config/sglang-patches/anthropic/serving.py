@@ -402,21 +402,48 @@ class AnthropicServing:
                 message="Internal server error",
             )
 
-        # Check for error responses from OpenAI handler
+        # Check for error responses from OpenAI handler and pass them through
         if not isinstance(response, ChatCompletionResponse):
-            # It's an error response (ORJSONResponse) — log the body before wrapping
             error_body = ""
             try:
                 error_body = response.body.decode("utf-8", errors="replace")
             except Exception:
                 error_body = str(response)
+
+            # Try to extract the original error message and status code
+            status_code = 500
+            error_type = "api_error"
+            error_message = "Internal processing error"
+
+            try:
+                import orjson
+                err_data = orjson.loads(response.body)
+                error_message = err_data.get("message", error_message)
+                if "context length" in error_message.lower() or "token" in error_message.lower():
+                    error_type = "invalid_request_error"
+                orig_code = err_data.get("code")
+                if isinstance(orig_code, int) and 400 <= orig_code < 600:
+                    status_code = orig_code
+            except Exception:
+                try:
+                    err_data = json.loads(error_body)
+                    error_message = err_data.get("message", error_message)
+                    if "context length" in error_message.lower() or "token" in error_message.lower():
+                        error_type = "invalid_request_error"
+                    orig_code = err_data.get("code")
+                    if isinstance(orig_code, int) and 400 <= orig_code < 600:
+                        status_code = orig_code
+                except Exception:
+                    pass
+
             logger.error(
-                "Anthropic handler received non-ChatCompletionResponse: %s", error_body
+                "Anthropic handler received non-ChatCompletionResponse (HTTP %s): %s",
+                status_code, error_body,
             )
             return self._error_response(
-                status_code=500,
-                error_type="internal_error",
-                message="Internal processing error",
+                status_code=status_code,
+                error_type=error_type,
+                message=error_message,
             )
 
         # Convert to Anthropic response

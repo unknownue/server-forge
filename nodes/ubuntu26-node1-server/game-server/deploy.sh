@@ -70,7 +70,7 @@ setup_moe_configs() {
 
 setup_moe_configs
 
-declare -A INSTANCE_NAME INSTANCE_GPUS INSTANCE_PORT INSTANCE_MODEL INSTANCE_TP INSTANCE_EXTRA_ARGS
+declare -a INSTANCE_NAME INSTANCE_GPUS INSTANCE_PORT INSTANCE_MODEL INSTANCE_TP INSTANCE_EXTRA_ARGS
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
@@ -230,13 +230,18 @@ start_instance() {
     local tp="${INSTANCE_TP[$idx]}"
     local extra_args="${INSTANCE_EXTRA_ARGS[$idx]}"
 
+    # Clean up any existing container with the same name (running or stopped)
     local existing
-    existing=$(docker ps -q --filter "name=$name" 2>/dev/null)
-    [[ -n "$existing" ]] && docker stop "$existing" 2>/dev/null || true
-    existing=$(docker ps -q --filter "publish=$port" 2>/dev/null)
+    existing=$(docker ps -a -q --filter "name=$name" 2>/dev/null)
     if [[ -n "$existing" ]]; then
-        log "  Stopping existing container on port $port..."
-        docker stop "$existing" 2>/dev/null || true
+        log "  Removing existing container $name..."
+        docker rm -f "$existing" 2>/dev/null || true
+    fi
+    # Clean up any container occupying the target port
+    existing=$(docker ps -a -q --filter "publish=$port" 2>/dev/null)
+    if [[ -n "$existing" ]]; then
+        log "  Removing existing container on port $port..."
+        docker rm -f "$existing" 2>/dev/null || true
     fi
 
     log "  Starting $name (GPU=$gpus TP=$tp port=$port)..."
@@ -306,13 +311,18 @@ start_comfyui() {
     log ""
     log "=== Starting ComfyUI (FLUX.2 FP8) on GPU 3 ==="
 
+    # Clean up any existing container with the same name (running or stopped)
     local existing
-    existing=$(docker ps -q --filter "name=gs-comfyui" 2>/dev/null)
-    [[ -n "$existing" ]] && docker stop "$existing" 2>/dev/null || true
-    existing=$(docker ps -q --filter "publish=8188" 2>/dev/null)
+    existing=$(docker ps -a -q --filter "name=gs-comfyui" 2>/dev/null)
     if [[ -n "$existing" ]]; then
-        log "  Stopping existing container on port 8188..."
-        docker stop "$existing" 2>/dev/null || true
+        log "  Removing existing container gs-comfyui..."
+        docker rm -f "$existing" 2>/dev/null || true
+    fi
+    # Clean up any container occupying the target port
+    existing=$(docker ps -a -q --filter "publish=8188" 2>/dev/null)
+    if [[ -n "$existing" ]]; then
+        log "  Removing existing container on port 8188..."
+        docker rm -f "$existing" 2>/dev/null || true
     fi
 
     if ! docker image inspect "$COMFYUI_IMAGE" &>/dev/null; then
@@ -342,7 +352,12 @@ start_comfyui() {
         > /dev/null 2>&1
 }
 
-# ── Wait for all instances to be healthy ──
+# ── Wait for all instances to be inference-ready ──
+# SGLang /health returns 200 before warmup completes, so we poll the
+# inference endpoint instead — it only returns 200 after the server is
+# fully initialized and "ready to roll".
+# First inference triggers CUDA graph capture (~3s) + Triton JIT for MoE
+# models, so we use a generous timeout.
 wait_all() {
     log ""
     log "=== Waiting for all instances to be ready ==="
@@ -355,13 +370,21 @@ wait_all() {
     for attempt in $(seq 1 300); do
         local all_ready=1
         for port in "${ports[@]}"; do
-            if [[ "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$port/health" 2>/dev/null)" != "200" ]]; then
+            local http_code
+            http_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 120 \
+                "http://localhost:$port/v1/chat/completions" \
+                -H "Content-Type: application/json" \
+                -d '{"model":"ready-check","messages":[{"role":"user","content":"ping"}],"max_tokens":1}' \
+                2>/dev/null)
+            if [[ "$http_code" != "200" ]]; then
                 all_ready=0
                 break
             fi
         done
         if [[ "$all_ready" == "1" ]]; then
             log "  All text instances ready (${attempt}x2s)."
+            log "  Waiting 5s for instances to stabilize..."
+            sleep 5
             return 0
         fi
         if [[ $((attempt % 30)) -eq 0 ]]; then
@@ -378,6 +401,8 @@ smoke_all() {
     log ""
     log "=== Smoke tests ==="
     local all_pass=1
+    local max_retries=3
+    local retry_delay=5
 
     for i in "${!INSTANCE_NAME[@]}"; do
         local name="${INSTANCE_NAME[$i]}"
@@ -386,21 +411,35 @@ smoke_all() {
         model_name=$(basename "${INSTANCE_MODEL[$i]}")
 
         local http_code
-        http_code=$(curl -s --max-time 60 -o /dev/null -w '%{http_code}' \
-            "http://localhost:$port/v1/chat/completions" \
-            -H "Content-Type: application/json" \
-            -d "{\"model\":\"$model_name\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in one word.\"}],\"max_tokens\":8}" \
-            2>/dev/null)
+        for retry in $(seq 1 $max_retries); do
+            http_code=$(curl -s --max-time 120 -o /dev/null -w '%{http_code}' \
+                "http://localhost:$port/v1/chat/completions" \
+                -H "Content-Type: application/json" \
+                -d "{\"model\":\"$model_name\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in one word.\"}],\"max_tokens\":32}" \
+                2>/dev/null)
+            [[ "$http_code" == "200" ]] && break
+            log "    Retry $retry/$max_retries: $name (port $port) — HTTP $http_code"
+            [[ $retry -lt $max_retries ]] && sleep "$retry_delay"
+        done
 
         if [[ "$http_code" == "200" ]]; then
             log "  PASS: $name (port $port)"
         else
-            log "  FAIL: $name (port $port) — HTTP $http_code"
+            log "  FAIL: $name (port $port) — HTTP $http_code (after $max_retries attempts)"
+            # Print last few log lines for diagnosis
+            log "  Last 5 log lines for $name:"
+            docker logs "$name" --tail 5 2>&1 | while IFS= read -r line; do
+                log "    | $line"
+            done
             all_pass=0
         fi
     done
 
-    [[ "$all_pass" == "0" ]] && { echo "ERROR: Smoke tests failed." >&2; return 1; }
+    if [[ "$all_pass" == "0" ]]; then
+        echo "ERROR: Smoke tests failed." >&2
+        return 1
+    fi
+    return 0
 }
 
 # ── Print status ──

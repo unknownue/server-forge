@@ -292,14 +292,33 @@ class AnthropicServing:
         )
         ctx_len = getattr(ctx_len, "context_length", 32768) if ctx_len else 32768
         max_tokens = anthropic_request.max_tokens
-        # Cap max_tokens to avoid exceeding context (input + output <= context)
-        safe_limit = max(512, ctx_len - 512)
+
+        # Estimate input tokens from message content (chars/3 ≈ tokens for English,
+        # plus per-message overhead for chat template formatting).
+        input_chars = 0
+        for msg in openai_messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                input_chars += len(content)
+            elif isinstance(content, list):
+                input_chars += sum(
+                    len(p.get("text", "")) for p in content if isinstance(p, dict)
+                )
+        tool_chars = sum(
+            len(json.dumps(getattr(t, "input_schema", {})))
+            for t in (anthropic_request.tools or [])
+        )
+        estimated_input = max(
+            512, (input_chars // 3) + len(openai_messages) * 64 + tool_chars
+        )
+        safe_limit = max(512, ctx_len - estimated_input - 1024)
         if max_tokens > safe_limit:
             logger.warning(
-                "Capping max_tokens from %s to %s (context_length=%s)",
-                max_tokens, safe_limit, ctx_len,
+                "Capping max_tokens %s → %s (ctx=%s, input_est=%s)",
+                max_tokens, safe_limit, ctx_len, estimated_input,
             )
             max_tokens = safe_limit
+
         request_data = {
             "messages": openai_messages,
             "model": anthropic_request.model,
@@ -316,15 +335,18 @@ class AnthropicServing:
         if anthropic_request.stop_sequences is not None:
             request_data["stop"] = anthropic_request.stop_sequences
 
-        # Map Anthropic thinking parameter to SGLang chat_template_kwargs
-        if anthropic_request.thinking is not None:
-            if anthropic_request.thinking.type == "disabled":
-                request_data["chat_template_kwargs"] = {"enable_thinking": False}
-            elif anthropic_request.thinking.budget_tokens is not None:
-                request_data["chat_template_kwargs"] = {
-                    "enable_thinking": True,
-                    "thinking_budget_tokens": anthropic_request.thinking.budget_tokens,
-                }
+        # Default thinking OFF to avoid Qwen3 consuming 30-50% output tokens
+        # on reasoning. Requests opt IN via thinking: {type: "enabled"}.
+        # Reasoning parser stays on the server for clean separation when enabled.
+        if (anthropic_request.thinking is not None
+                and anthropic_request.thinking.type == "enabled"):
+            budget = anthropic_request.thinking.budget_tokens
+            kwargs = {"enable_thinking": True}
+            if budget is not None:
+                kwargs["thinking_budget_tokens"] = budget
+            request_data["chat_template_kwargs"] = kwargs
+        else:
+            request_data["chat_template_kwargs"] = {"enable_thinking": False}
 
         # Enable usage in stream so we can report it
         if anthropic_request.stream:
@@ -531,6 +553,10 @@ class AnthropicServing:
         usage_info: Optional[dict] = None
         message_id = f"msg_{uuid.uuid4().hex}"
         model = anthropic_request.model
+        # Track whether any text or tool_use block was emitted, for fallback
+        accumulated_thinking: str = ""
+        had_text_block: bool = False
+        had_tool_use_block: bool = False
 
         async for sse_line in openai_stream:
             if not sse_line.startswith("data: "):
@@ -547,6 +573,43 @@ class AnthropicServing:
                     )
                     yield _wrap_sse_event(
                         stop_event.model_dump_json(exclude_none=True),
+                        "content_block_stop",
+                    )
+
+                # Fallback: if the stream only emitted thinking blocks (no text,
+                # no tool_use), append the accumulated thinking as a text block
+                # so clients always have output to act on.
+                if not had_text_block and not had_tool_use_block and accumulated_thinking:
+                    logger.warning(
+                        "Stream thinking consumed all tokens "
+                        "(accumulated=%d chars). Emitting text fallback.",
+                        len(accumulated_thinking),
+                    )
+                    fb_idx = content_block_index + 1
+                    yield _wrap_sse_event(
+                        AnthropicStreamEvent(
+                            type="content_block_start",
+                            index=fb_idx,
+                            content_block=AnthropicContentBlock(type="text", text=""),
+                        ).model_dump_json(exclude_none=True),
+                        "content_block_start",
+                    )
+                    yield _wrap_sse_event(
+                        AnthropicStreamEvent(
+                            type="content_block_delta",
+                            index=fb_idx,
+                            delta=AnthropicDelta(
+                                type="text_delta",
+                                text=accumulated_thinking,
+                            ),
+                        ).model_dump_json(exclude_none=True),
+                        "content_block_delta",
+                    )
+                    yield _wrap_sse_event(
+                        AnthropicStreamEvent(
+                            type="content_block_stop",
+                            index=fb_idx,
+                        ).model_dump_json(exclude_none=True),
                         "content_block_stop",
                     )
 
@@ -643,6 +706,7 @@ class AnthropicServing:
 
             # Handle tool call deltas
             if delta.tool_calls:
+                had_tool_use_block = True
                 for tc in delta.tool_calls:
                     tc_id = tc.id
                     tc_func = tc.function
@@ -727,6 +791,7 @@ class AnthropicServing:
             # Handle reasoning/thinking deltas (from --reasoning-parser qwen3)
             reasoning = getattr(delta, "reasoning_content", None)
             if reasoning is not None and reasoning != "":
+                accumulated_thinking += reasoning
                 # Transition from text/tool block to thinking block
                 if content_block_open and current_block_type != "thinking":
                     for ev in _close_current_block():
@@ -762,6 +827,7 @@ class AnthropicServing:
 
             # Handle text content deltas
             if delta.content is not None and delta.content != "":
+                had_text_block = True
                 # Transition from thinking/tool block to text block
                 if content_block_open and current_block_type != "text":
                     for ev in _close_current_block():
@@ -839,6 +905,27 @@ class AnthropicServing:
                         name=tool_call.function.name,
                         input=tool_input,
                     )
+                )
+
+        # Fallback: if reasoning consumed all max_tokens, the response may
+        # have only thinking blocks with no text or tool_use. Expose the
+        # reasoning content as text so clients (Claude Code) always have
+        # actionable output.
+        has_text = any(b.type == "text" for b in content)
+        has_tool_use = any(b.type == "tool_use" for b in content)
+        if not has_text and not has_tool_use:
+            if reasoning:
+                logger.warning(
+                    "Thinking consumed all max_tokens: reasoning=%d chars, "
+                    "no text or tool_calls. Exposing reasoning as text fallback.",
+                    len(reasoning),
+                )
+                content.append(
+                    AnthropicContentBlock(type="text", text=reasoning)
+                )
+            else:
+                content.append(
+                    AnthropicContentBlock(type="text", text="")
                 )
 
         # Map stop reason

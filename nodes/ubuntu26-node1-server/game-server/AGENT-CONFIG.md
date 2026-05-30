@@ -13,34 +13,33 @@ Advantages of local endpoints: no API cost, no rate limits, data locality, speci
 ┌──────────────────────────────────────────────────────────────────┐
 │                       ubuntu26-node1-server                       │
 │                                                                   │
-│  GPU 0: Qwen3.6-27B FP8  ──→  :8000  (80K Long)                  │
-│  GPU 1: Qwen3.6-35B-A3B   ──→  :8001  (65K MoE)                  │
-│  GPU 2: Qwen3.6-27B FP8  ──→  :8002  (40K Fast)                  │
+│  GPU 0: Qwen3.6-27B FP8  ──→  :8000  (128K solo agent)           │
+│  GPU 1: Qwen3.6-35B-A3B   ──→  :8001  (80K MoE, 2 concurrent)    │
+│  GPU 2: Qwen3.6-27B FP8  ──→  :8002  (48K dual subagent)         │
 │  GPU 3: FLUX.2 FP8        ──→  :8188  (ComfyUI)                   │
 │                                                                   │
-│  All text endpoints serve --reasoning-parser qwen3 for clean      │
-│  thinking separation. Thinking controlled per-request via the     │
-│  Anthropic "thinking" parameter.                                  │
+│  --reasoning-parser qwen3 active. Thinking OFF by default         │
+│  (enable_thinking=false). Opt-in: thinking: {type: "enabled"}.    │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
 ### Quick Reference
 
-| Port | Model | Context | Default Thinking | Role | Routing |
-|------|-------|---------|-----------------|------|---------|
-| **:8001** | Qwen3.6-35B-A3B-FP8 (MoE) | 65K | enabled | **Primary** — main session, code gen, default for all CC roles | `ANTHROPIC_BASE_URL` |
-| :8000 | Qwen3.6-27B-FP8-Long | 80K | enabled | Deep context — director subagents, main session overflow | Explicit model override |
-| :8002 | Qwen3.6-27B-FP8 | 40K | on-demand | Throughput — QA, quick edits, single-file subagents | Explicit model override |
+| Port | Model | Context | Concurrency | Role | Routing |
+|------|-------|---------|------------|------|---------|
+| **:8001** | Qwen3.6-35B-A3B-FP8 (MoE) | 80K | 2 | **Primary** — main session, code gen | `ANTHROPIC_BASE_URL` |
+| :8000 | Qwen3.6-27B-FP8-Long | 128K | 1 | Solo agent — director synthesis, deep overflow | Explicit model override |
+| :8002 | Qwen3.6-27B-FP8 | 48K | 2 | Throughput — QA, quick edits, single-file | Explicit model override |
 | :8188 | FLUX.2 FP8 (ComfyUI) | — | — | Image generation | Direct API call |
 
 **Routing for CCGS agents:**
 
-| Task | Model to use | Thinking | Why |
-|------|-------------|----------|-----|
-| Main CC session | MoE (:8001) | enabled | Interactive, quality-first |
-| Director subagents | Long (:8000) | enabled | Multi-GDD synthesis needs deep reasoning |
-| Code gen subagents | MoE (:8001) | enabled | Complex algorithms benefit from reasoning |
-| QA / quick subagents | Fast (:8002) | `"thinking":{"type":"disabled"}` | Simple tasks, zero reasoning overhead |
+| Task | Model to use | Why |
+|------|-------------|-----|
+| Main CC session | MoE (:8001) | 8× throughput, 80K context, 2 concurrent |
+| Director subagents | Long (:8000) | 128K solo for multi-GDD synthesis |
+| Code gen subagents | MoE (:8001) | Long (:8000) if MoE saturated |
+| QA / quick subagents | Fast (:8002) | 48K, dual concurrent |
 
 ## Claude Code Configuration
 
@@ -60,12 +59,14 @@ export ANTHROPIC_DEFAULT_OPUS_MODEL="Qwen3.6-35B-A3B-FP8"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="Qwen3.6-35B-A3B-FP8"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="Qwen3.6-35B-A3B-FP8"
 
-# ── Capability overrides (unsupported by local models) ──
-export CLAUDE_CODE_DISABLE_THINKING=1
+# ── Thinking: OFF by default at serving layer. CLAUDE_CODE_DISABLE_THINKING
+#    is optional/no-op. Opt-in per-request: thinking: {type: "enabled"}.
 export DISABLE_PROMPT_CACHING=1
 
-# ── Context compaction (65K window, compact at 85% ≈ 55K) ──
-export CLAUDE_CODE_AUTO_COMPACT_WINDOW=65536
+# ── Context compaction (80K window matching default :8001, compact at 85% ≈ 68K) ──
+#    When using :8000 (128K): set this to 131072 for full context utilization.
+#    When using :8002 (48K):  serving layer auto-caps max_tokens to prevent overflow.
+export CLAUDE_CODE_AUTO_COMPACT_WINDOW=81920
 export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=85
 
 # ── Optional: friendly model names ──
@@ -84,9 +85,8 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME="Qwen3.6 35B MoE"
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "Qwen3.6-35B-A3B-FP8",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "Qwen3.6-35B-A3B-FP8",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "Qwen3.6-35B-A3B-FP8",
-    "CLAUDE_CODE_DISABLE_THINKING": "1",
     "DISABLE_PROMPT_CACHING": "1",
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "65536",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "81920",
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "85"
   }
 }
@@ -111,11 +111,13 @@ Claude Code's own system prompt and tool definitions consume ~23K tokens.
 This overhead applies to the **main session** but **NOT to subagents** —
 subagents only load their custom prompt (~1-8K).
 
-| Endpoint | SGLang Context | Main session (after 23K) | Subagent (after prompt) |
-|----------|---------------|-------------------------|------------------------|
-| :8001 (MoE) | 65,536 | ~42K | ~60-64K |
-| :8000 (Long) | 81,920 | ~58K | ~73-80K |
-| :8002 (Fast) | 40,960 | ~18K | ~37-39K |
+| Endpoint | SGLang Context | Main session (after 23K) | /start (34K overhead) | Subagent (1-8K) |
+|----------|---------------|-------------------------|----------------------|-----------------|
+| :8001 (MoE) | 81,920 | ~58K | ~47K | ~73-80K |
+| :8000 (Long) | 131,072 | ~108K | ~97K | ~123-130K |
+| :8002 (Fast) | 49,152 | ~26K* | ~15K* | ~41-48K |
+
+*Serving layer auto-caps max_tokens to prevent context overflow.
 
 ### Context Budget per Agent Type (subagents)
 
@@ -128,20 +130,21 @@ subagents only load their custom prompt (~1-8K).
 
 ### Compaction
 
-- `CLAUDE_CODE_AUTO_COMPACT_WINDOW=65536` — treat 65K as compaction target
-- `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=85` — compact at ~55K used
-- When overflowing to Long (:8000), set `CLAUDE_CODE_AUTO_COMPACT_WINDOW=81920`
+- `CLAUDE_CODE_AUTO_COMPACT_WINDOW=81920` — matches default endpoint :8001 (80K)
+- `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=85` — compact at ~68K used
+- When overflowing to :8000 (128K): `export CLAUDE_CODE_AUTO_COMPACT_WINDOW=131072`
+- When switching to :8002 (48K): no config change needed — serving layer auto-caps max_tokens
 - **Do NOT use `CLAUDE_CODE_MAX_CONTEXT_TOKENS`** — requires `DISABLE_COMPACT=1`, which disables compaction entirely
 
 ### Three-Tier Design
 
-| Endpoint | Context | max-running | KV/req (full) | Design rationale |
-|----------|---------|------------|---------------|-----------------|
-| Long (:8000) | 81,920 | 4 | 20.5 GB | 27B Dense, more VRAM for context vs throughput |
-| MoE (:8001) | 65,536 | 4 | 16.8 GB | 35B→3B active, 8× throughput, 35B knowledge width |
-| Fast (:8002) | 40,960 | auto | 10.5 GB | Higher concurrency, enough for single-task subagents |
+| Endpoint | Context | max_running | KV pool | Max usage | Design rationale |
+|----------|---------|------------|---------|-----------|-----------------|
+| Long (:8000) | 131,072 | 1 | 689K | 131K (19%) | 27B Dense. Solo agent, full context, no contention |
+| MoE (:8001) | 81,920 | 2 | 1965K | 164K (8%) | 35B→3B active. Tiny KV per token, massive headroom |
+| Fast (:8002) | 49,152 | 2 | 689K | 98K (14%) | 27B Dense. Dual subagent, good headroom |
 
-**Aggregate**: ~861 tok/s text throughput, 11-13 concurrent agents (mixed loads).
+**Aggregate**: ~861 tok/s text throughput, up to 5 concurrent requests (1+2+2).
 
 ## Deployment Commands
 
@@ -167,69 +170,76 @@ to prevent eager-mode decode path bug.
 Qwen3 GDN/Mamba hybrid requires auto page size. `--page-size 64` causes:
 `AssertionError: Page size must be 1 for MambaRadixCache v1`.
 
-### Thinking Mode Strategy
+### Tool Calling
 
-All endpoints run `--reasoning-parser qwen3` for clean thinking/content
-separation. The parser does NOT enable or disable thinking — Qwen3 models
-will think regardless. The parser only determines whether thinking output
-is cleanly separated into `thinking` content blocks or mixed into `text`.
+All endpoints run `--tool-call-parser qwen3_coder`, which parses Qwen3.6's
+native XML tool call format (`<tool_call><function=n><parameter=p>v</parameter></function></tool_call>`)
+into structured tool calls. The Anthropic conversion layer maps them to
+standard `tool_use` content blocks.
 
-**Actual thinking control** happens at the request level via
-`chat_template_kwargs: {"enable_thinking": false}`, mapped from the
-Anthropic `thinking` parameter.
+```bash
+# Tool calling works via the Anthropic endpoint
+curl -s http://localhost:8001/v1/messages \
+  -H "Content-Type: application/json" -H "x-api-key: dummy" \
+  -d '{"model":"Qwen3.6-35B-A3B-FP8","max_tokens":512,
+       "tools":[{"name":"Read","description":"Read a file",
+                 "input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}}],
+       "messages":[{"role":"user","content":"Read README.md"}]}'
+# → content: [tool_use {name: "Read", input: {file_path: "README.md"}}]
+```
 
-| Endpoint | Default | CCGS Agent Usage |
-|----------|---------|-----------------|
-| :8000 (Long) | thinking enabled | Director subagents — multi-GDD synthesis needs deep analysis |
-| :8001 (MoE) | thinking enabled | Main session + code gen — interactive and complex tasks |
-| :8002 (Fast) | on-demand | QA/quick subagents **should disable**: `"thinking":{"type":"disabled"}` |
+This enables Claude Code's full skill/tool ecosystem (AskUserQuestion, Read,
+Write, Bash, etc.) on local Qwen3 endpoints.
 
-**Why subagents should disable thinking on :8002**: A QA agent with
-`max_tokens:64` loses ~45 tokens to reasoning overhead (70%). With
-thinking disabled, all 64 tokens go to the actual output.
+### Thinking Mode & Content Guarantee
 
-**Why code gen keeps thinking on :8001**: Complex algorithms (inventory
-systems, pathfinding, state machines) benefit from the reasoning step.
-The 30-50% overhead is worthwhile for correctness.
+Qwen3 models are trained to think internally. Without control, this consumes
+30-50% of output tokens on reasoning. The Anthropic serving layer **defaults
+thinking to OFF** (`enable_thinking: false`) — all output tokens go directly
+to content. No token waste.
+
+The server keeps `--reasoning-parser qwen3` for clean thinking/content
+separation when thinking IS explicitly opted-in.
+
+```bash
+# Default: thinking off, all tokens to output (100% token efficiency)
+curl -s http://localhost:8001/v1/messages \
+  -H "Content-Type: application/json" -H "x-api-key: dummy" \
+  -d '{"model":"x","max_tokens":256,
+       "messages":[{"role":"user","content":"Write a quick sort."}]}'
+
+# Opt-in: enable thinking with optional budget
+curl -s http://localhost:8001/v1/messages \
+  -H "Content-Type: application/json" -H "x-api-key: dummy" \
+  -d '{"model":"x","max_tokens":4096,
+       "thinking":{"type":"enabled","budget_tokens":1024},
+       "messages":[{"role":"user","content":"Design a game inventory system."}]}'
+```
+
+| Parameter | Effect | Token efficiency |
+|-----------|--------|-----------------|
+| *(default)* | Thinking off, direct output | 100% |
+| `thinking: {type: "enabled"}` | Thinking on | 50-70% |
+| `thinking: {type: "enabled", budget_tokens: N}` | Thinking on with token cap | ≥ (max_tokens - N) / max_tokens |
+
+**Content guarantee**: When thinking is enabled and consumes all max_tokens,
+the serving layer falls back to exposing thinking content as text. Clients
+never receive an empty response.
 
 ### Streaming Strategy
 
 | Scenario | Streaming | Reason |
 |----------|-----------|--------|
 | Main CC session (interactive) | ✅ `stream: true` | Real-time user feedback is essential |
-| All subagents (programmatic) | ❌ `stream: false` | Output consumed by code, not humans. Non-streaming is simpler and faster |
-
-Subagents are programmatic — Claude Code reads the response as structured data.
-Streaming adds SSE parsing overhead with zero benefit for non-interactive use.
+| All subagents (programmatic) | ❌ `stream: false` | Output consumed by code, not humans |
 
 ### Per-Request Control
 
-The Anthropic `thinking` parameter maps to SGLang's `chat_template_kwargs`:
+`thinking: {type: "disabled"}` is no longer needed for disabling — it's the
+default. Use `thinking: {type: "enabled"}` to opt back in when needed
+(complex code gen, director synthesis).
 
-```bash
-# Disable reasoning — all tokens go to output (use for QA/quick subagents)
-curl -s http://localhost:8002/v1/messages \
-  -H "Content-Type: application/json" -H "x-api-key: dummy" \
-  -d '{"model":"Qwen3.6-27B-FP8","max_tokens":256,
-       "thinking":{"type":"disabled"},
-       "messages":[{"role":"user","content":"Write a quick sort."}]}'
-
-# Enable with budget — limit reasoning overhead (use for code gen)
-curl -s http://localhost:8001/v1/messages \
-  -H "Content-Type: application/json" -H "x-api-key: dummy" \
-  -d '{"model":"Qwen3.6-35B-A3B-FP8","max_tokens":4096,
-       "thinking":{"type":"enabled","budget_tokens":1024},
-       "messages":[{"role":"user","content":"Design a game inventory system."}]}'
-```
-
-| Parameter | Effect | Token overhead |
-|-----------|--------|---------------|
-| `thinking: {type: "disabled"}` | Model-level thinking off | 0% |
-| *(omit thinking)* | Server default (thinking on) | 30-50% |
-| `thinking: {type: "enabled", budget_tokens: N}` | Thinking capped at N tokens | ≤ N |
-
-Works with both `stream: true` and `stream: false`. When thinking disabled,
-stream emits only `text_delta` events (no `thinking_delta`).
+Works with both `stream: true` and `stream: false`.
 
 ## SDK Integration
 

@@ -316,6 +316,16 @@ class AnthropicServing:
         if anthropic_request.stop_sequences is not None:
             request_data["stop"] = anthropic_request.stop_sequences
 
+        # Map Anthropic thinking parameter to SGLang chat_template_kwargs
+        if anthropic_request.thinking is not None:
+            if anthropic_request.thinking.type == "disabled":
+                request_data["chat_template_kwargs"] = {"enable_thinking": False}
+            elif anthropic_request.thinking.budget_tokens is not None:
+                request_data["chat_template_kwargs"] = {
+                    "enable_thinking": True,
+                    "thinking_budget_tokens": anthropic_request.thinking.budget_tokens,
+                }
+
         # Enable usage in stream so we can report it
         if anthropic_request.stream:
             request_data["stream_options"] = StreamOptions(include_usage=True)
@@ -516,6 +526,7 @@ class AnthropicServing:
         first_chunk = True
         content_block_index = 0
         content_block_open = False
+        current_block_type: Optional[str] = None  # "text", "thinking", "tool_use"
         finish_reason: Optional[str] = None
         usage_info: Optional[dict] = None
         message_id = f"msg_{uuid.uuid4().hex}"
@@ -604,9 +615,11 @@ class AnthropicServing:
                     start_event.model_dump_json(exclude_none=True),
                     "message_start",
                 )
-                # Skip if this was just the role chunk with empty content
-                if chunk.choices and chunk.choices[0].delta.content == "":
-                    continue
+                # Skip if this was just the role chunk (no content or reasoning)
+                if chunk.choices:
+                    delta = chunk.choices[0].delta
+                    if not delta.content and not getattr(delta, "reasoning_content", None):
+                        continue
 
             # Usage-only chunk (empty choices with usage info)
             if not chunk.choices and chunk.usage:
@@ -664,6 +677,7 @@ class AnthropicServing:
                             "content_block_start",
                         )
                         content_block_open = True
+                        current_block_type = "tool_use"
 
                         # Stream initial arguments if present
                         if tc_func.arguments:
@@ -696,8 +710,63 @@ class AnthropicServing:
                         )
                 continue
 
+            # Helper: close current content block and advance index
+            def _close_current_block():
+                nonlocal content_block_open, content_block_index, current_block_type
+                if content_block_open:
+                    yield _wrap_sse_event(
+                        AnthropicStreamEvent(
+                            type="content_block_stop", index=content_block_index
+                        ).model_dump_json(exclude_none=True),
+                        "content_block_stop",
+                    )
+                    content_block_index += 1
+                    content_block_open = False
+                    current_block_type = None
+
+            # Handle reasoning/thinking deltas (from --reasoning-parser qwen3)
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning is not None and reasoning != "":
+                # Transition from text/tool block to thinking block
+                if content_block_open and current_block_type != "thinking":
+                    for ev in _close_current_block():
+                        yield ev
+
+                # Start thinking block if not already open
+                if not content_block_open:
+                    yield _wrap_sse_event(
+                        AnthropicStreamEvent(
+                            type="content_block_start",
+                            index=content_block_index,
+                            content_block=AnthropicContentBlock(
+                                type="thinking", thinking=""
+                            ),
+                        ).model_dump_json(exclude_none=True),
+                        "content_block_start",
+                    )
+                    content_block_open = True
+                    current_block_type = "thinking"
+
+                # Emit thinking delta
+                yield _wrap_sse_event(
+                    AnthropicStreamEvent(
+                        type="content_block_delta",
+                        index=content_block_index,
+                        delta=AnthropicDelta(
+                            type="thinking_delta",
+                            thinking=reasoning,
+                        ),
+                    ).model_dump_json(exclude_none=True),
+                    "content_block_delta",
+                )
+
             # Handle text content deltas
             if delta.content is not None and delta.content != "":
+                # Transition from thinking/tool block to text block
+                if content_block_open and current_block_type != "text":
+                    for ev in _close_current_block():
+                        yield ev
+
                 # Start a text content block if needed
                 if not content_block_open:
                     start_event = AnthropicStreamEvent(
@@ -710,6 +779,7 @@ class AnthropicServing:
                         "content_block_start",
                     )
                     content_block_open = True
+                    current_block_type = "text"
 
                 # Emit text delta
                 delta_event = AnthropicStreamEvent(
@@ -739,6 +809,14 @@ class AnthropicServing:
 
         choice = response.choices[0]
         content: list[AnthropicContentBlock] = []
+
+        # Add reasoning/thinking content (from --reasoning-parser qwen3)
+        # Thinking blocks come BEFORE text blocks per Anthropic API convention.
+        reasoning = getattr(choice.message, "reasoning_content", None)
+        if reasoning:
+            content.append(
+                AnthropicContentBlock(type="thinking", thinking=reasoning)
+            )
 
         # Add text content
         if choice.message.content:

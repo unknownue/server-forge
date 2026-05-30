@@ -97,6 +97,20 @@ class AnthropicCountTokensResponse(BaseModel):
     input_tokens: int
 
 
+class AnthropicThinking(BaseModel):
+    """Anthropic extended thinking configuration"""
+
+    type: Literal["enabled", "disabled"]
+    budget_tokens: Optional[int] = None
+
+    @field_validator("budget_tokens")
+    @classmethod
+    def validate_budget_tokens(cls, v):
+        if v is not None and v < 1024:
+            raise ValueError("budget_tokens must be at least 1024")
+        return v
+
+
 class AnthropicMessagesRequest(BaseModel):
     """Anthropic Messages API request"""
 
@@ -108,6 +122,7 @@ class AnthropicMessagesRequest(BaseModel):
     stream: Optional[bool] = False
     system: Optional[str | list[AnthropicContentBlock]] = None
     temperature: Optional[float] = None
+    thinking: Optional[AnthropicThinking] = None
     tool_choice: Optional[AnthropicToolChoice] = None
     tools: Optional[list[AnthropicTool]] = None
     top_k: Optional[int] = None
@@ -131,9 +146,10 @@ class AnthropicMessagesRequest(BaseModel):
 class AnthropicDelta(BaseModel):
     """Delta for streaming responses"""
 
-    type: Optional[Literal["text_delta", "input_json_delta"]] = None
+    type: Optional[Literal["text_delta", "input_json_delta", "thinking_delta", "signature_delta"]] = None
     text: Optional[str] = None
     partial_json: Optional[str] = None
+    thinking: Optional[str] = None
 
     # Message delta fields
     stop_reason: Optional[

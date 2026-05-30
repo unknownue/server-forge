@@ -13,33 +13,34 @@ Advantages of local endpoints: no API cost, no rate limits, data locality, speci
 ┌──────────────────────────────────────────────────────────────────┐
 │                       ubuntu26-node1-server                       │
 │                                                                   │
-│  GPU 0: Qwen3.6-27B FP8  ──→  :8000  (80K Long, Anthropic+OpenAI)│
-│  GPU 1: Qwen3.6-35B-A3B   ──→  :8001  (65K MoE, Anthropic+OpenAI)│
-│  GPU 2: Qwen3.6-27B FP8  ──→  :8002  (40K Fast, Anthropic+OpenAI)│
+│  GPU 0: Qwen3.6-27B FP8  ──→  :8000  (80K Long)                  │
+│  GPU 1: Qwen3.6-35B-A3B   ──→  :8001  (65K MoE)                  │
+│  GPU 2: Qwen3.6-27B FP8  ──→  :8002  (40K Fast)                  │
 │  GPU 3: FLUX.2 FP8        ──→  :8188  (ComfyUI)                   │
 │                                                                   │
-│  Native Anthropic /v1/messages + OpenAI /v1/chat/completions.     │
-│  No translation proxy needed. SGLang patches auto-mounted.        │
+│  All text endpoints serve --reasoning-parser qwen3 for clean      │
+│  thinking separation. Thinking controlled per-request via the     │
+│  Anthropic "thinking" parameter.                                  │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
 ### Quick Reference
 
-| Port | Model | Context | Role | Routing |
-|------|-------|---------|------|---------|
-| **:8001** | Qwen3.6-35B-A3B-FP8 (MoE) | 65K | **Primary** — main session, code gen, default for all CC roles | `ANTHROPIC_BASE_URL` |
-| :8000 | Qwen3.6-27B-FP8-Long | 80K | Deep context — director subagents, main session overflow | Explicit model override |
-| :8002 | Qwen3.6-27B-FP8 | 40K | Throughput — QA, quick edits, single-file subagents | Explicit model override |
-| :8188 | FLUX.2 FP8 (ComfyUI) | — | Image generation | Direct API call |
+| Port | Model | Context | Default Thinking | Role | Routing |
+|------|-------|---------|-----------------|------|---------|
+| **:8001** | Qwen3.6-35B-A3B-FP8 (MoE) | 65K | enabled | **Primary** — main session, code gen, default for all CC roles | `ANTHROPIC_BASE_URL` |
+| :8000 | Qwen3.6-27B-FP8-Long | 80K | enabled | Deep context — director subagents, main session overflow | Explicit model override |
+| :8002 | Qwen3.6-27B-FP8 | 40K | on-demand | Throughput — QA, quick edits, single-file subagents | Explicit model override |
+| :8188 | FLUX.2 FP8 (ComfyUI) | — | — | Image generation | Direct API call |
 
 **Routing for CCGS agents:**
 
-| Task | Model to use | Why |
-|------|-------------|-----|
-| Main CC session | MoE (:8001) | 8× throughput, 65K, ~42K usable after system overhead |
-| Director subagents | Long (:8000) | No CC overhead → ~80K usable for multi-GDD synthesis |
-| Code gen subagents | MoE (:8001) | Speed; Long (:8000) if MoE saturated |
-| QA / quick subagents | Fast (:8002) | 40K plenty for single-task agents, max concurrency |
+| Task | Model to use | Thinking | Why |
+|------|-------------|----------|-----|
+| Main CC session | MoE (:8001) | enabled | Interactive, quality-first |
+| Director subagents | Long (:8000) | enabled | Multi-GDD synthesis needs deep reasoning |
+| Code gen subagents | MoE (:8001) | enabled | Complex algorithms benefit from reasoning |
+| QA / quick subagents | Fast (:8002) | `"thinking":{"type":"disabled"}` | Simple tasks, zero reasoning overhead |
 
 ## Claude Code Configuration
 
@@ -166,9 +167,69 @@ to prevent eager-mode decode path bug.
 Qwen3 GDN/Mamba hybrid requires auto page size. `--page-size 64` causes:
 `AssertionError: Page size must be 1 for MambaRadixCache v1`.
 
-### Reasoning Parser
-`--reasoning-parser qwen3` spends ~30-50% output tokens on internal reasoning.
-Acceptable for code gen (improves quality). Disable for fast iteration.
+### Thinking Mode Strategy
+
+All endpoints run `--reasoning-parser qwen3` for clean thinking/content
+separation. The parser does NOT enable or disable thinking — Qwen3 models
+will think regardless. The parser only determines whether thinking output
+is cleanly separated into `thinking` content blocks or mixed into `text`.
+
+**Actual thinking control** happens at the request level via
+`chat_template_kwargs: {"enable_thinking": false}`, mapped from the
+Anthropic `thinking` parameter.
+
+| Endpoint | Default | CCGS Agent Usage |
+|----------|---------|-----------------|
+| :8000 (Long) | thinking enabled | Director subagents — multi-GDD synthesis needs deep analysis |
+| :8001 (MoE) | thinking enabled | Main session + code gen — interactive and complex tasks |
+| :8002 (Fast) | on-demand | QA/quick subagents **should disable**: `"thinking":{"type":"disabled"}` |
+
+**Why subagents should disable thinking on :8002**: A QA agent with
+`max_tokens:64` loses ~45 tokens to reasoning overhead (70%). With
+thinking disabled, all 64 tokens go to the actual output.
+
+**Why code gen keeps thinking on :8001**: Complex algorithms (inventory
+systems, pathfinding, state machines) benefit from the reasoning step.
+The 30-50% overhead is worthwhile for correctness.
+
+### Streaming Strategy
+
+| Scenario | Streaming | Reason |
+|----------|-----------|--------|
+| Main CC session (interactive) | ✅ `stream: true` | Real-time user feedback is essential |
+| All subagents (programmatic) | ❌ `stream: false` | Output consumed by code, not humans. Non-streaming is simpler and faster |
+
+Subagents are programmatic — Claude Code reads the response as structured data.
+Streaming adds SSE parsing overhead with zero benefit for non-interactive use.
+
+### Per-Request Control
+
+The Anthropic `thinking` parameter maps to SGLang's `chat_template_kwargs`:
+
+```bash
+# Disable reasoning — all tokens go to output (use for QA/quick subagents)
+curl -s http://localhost:8002/v1/messages \
+  -H "Content-Type: application/json" -H "x-api-key: dummy" \
+  -d '{"model":"Qwen3.6-27B-FP8","max_tokens":256,
+       "thinking":{"type":"disabled"},
+       "messages":[{"role":"user","content":"Write a quick sort."}]}'
+
+# Enable with budget — limit reasoning overhead (use for code gen)
+curl -s http://localhost:8001/v1/messages \
+  -H "Content-Type: application/json" -H "x-api-key: dummy" \
+  -d '{"model":"Qwen3.6-35B-A3B-FP8","max_tokens":4096,
+       "thinking":{"type":"enabled","budget_tokens":1024},
+       "messages":[{"role":"user","content":"Design a game inventory system."}]}'
+```
+
+| Parameter | Effect | Token overhead |
+|-----------|--------|---------------|
+| `thinking: {type: "disabled"}` | Model-level thinking off | 0% |
+| *(omit thinking)* | Server default (thinking on) | 30-50% |
+| `thinking: {type: "enabled", budget_tokens: N}` | Thinking capped at N tokens | ≤ N |
+
+Works with both `stream: true` and `stream: false`. When thinking disabled,
+stream emits only `text_delta` events (no `thinking_delta`).
 
 ## SDK Integration
 

@@ -102,7 +102,7 @@ load_plan() {
         default)
             log "  GPU 0: Qwen3.6-27B    FP8 → :8000 (80K long context)"
             log "  GPU 1: Qwen3.6-35B-A3B FP8 → :8001 (MoE 35B→3B, tuned kernel config)"
-            log "  GPU 2: Qwen3.6-27B    FP8 → :8002 (40K high concurrency)"
+            log "  GPU 2: Qwen3.6-27B    FP8 → :8002 (40K fast, reasoning on-demand)"
             log "  GPU 3: FLUX.2 FP8          → :8188 (ComfyUI)"
             log "  Aggregate: ~484 tok/s (text), concurrent ~97 @8K"
 

@@ -77,7 +77,7 @@ log() { echo "[$(date +%H:%M:%S)] $*"; }
 # ── Shared SGLang flags ──
 SHARED_ARGS="--host 0.0.0.0 --port 8000 \
 --attention-backend flashinfer --kv-cache-dtype fp8_e5m2 \
---mem-fraction-static 0.85"
+--mem-fraction-static 0.92"
 
 # ── Pre-flight checks ──
 preflight() {
@@ -100,9 +100,9 @@ load_plan() {
 
     case "$PLAN" in
         default)
-            log "  GPU 0: Qwen3.6-27B    FP8 → :8000 (128K solo agent)"
-            log "  GPU 1: Qwen3.6-35B-A3B FP8 → :8001 (80K MoE, 2 concurrent)"
-            log "  GPU 2: Qwen3.6-27B    FP8 → :8002 (48K dual subagent)"
+            log "  GPU 0: Qwen3.6-27B    FP8 → :8000 (192K solo agent)"
+            log "  GPU 1: Qwen3.6-35B-A3B FP8 → :8001 (128K MoE, 2 concurrent)"
+            log "  GPU 2: Qwen3.6-27B    FP8 → :8002 (64K dual subagent)"
             log "  GPU 3: FLUX.2 FP8          → :8188 (ComfyUI)"
             log "  Aggregate: ~484 tok/s (text), concurrent ~97 @8K"
 
@@ -111,21 +111,21 @@ load_plan() {
             INSTANCE_PORT[0]="8000"
             INSTANCE_MODEL[0]="${MODELS_BASE}/Qwen/Qwen3.6-27B"
             INSTANCE_TP[0]="1"
-            INSTANCE_EXTRA_ARGS[0]="$SHARED_ARGS --context-length 131072 --quantization fp8 --max-running-requests 1 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-27B-FP8-Long"
+            INSTANCE_EXTRA_ARGS[0]="$SHARED_ARGS --context-length 196608 --quantization fp8 --max-running-requests 1 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-27B-FP8-Long"
 
             INSTANCE_NAME[1]="gs-35b-moe-code"
             INSTANCE_GPUS[1]="1"
             INSTANCE_PORT[1]="8001"
             INSTANCE_MODEL[1]="${MODELS_BASE}/Qwen/Qwen3.6-35B-A3B"
             INSTANCE_TP[1]="1"
-            INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --context-length 81920 --quantization fp8 --cuda-graph-max-bs 8 --max-running-requests 2 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-35B-A3B-FP8"
+            INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --context-length 131072 --quantization fp8 --cuda-graph-max-bs 8 --max-running-requests 2 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-35B-A3B-FP8"
 
             INSTANCE_NAME[2]="gs-27b-fast"
             INSTANCE_GPUS[2]="2"
             INSTANCE_PORT[2]="8002"
             INSTANCE_MODEL[2]="${MODELS_BASE}/Qwen/Qwen3.6-27B"
             INSTANCE_TP[2]="1"
-            INSTANCE_EXTRA_ARGS[2]="$SHARED_ARGS --context-length 49152 --quantization fp8 --max-running-requests 2 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-27B-FP8"
+            INSTANCE_EXTRA_ARGS[2]="$SHARED_ARGS --context-length 65536 --quantization fp8 --max-running-requests 2 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-27B-FP8"
             ;;
 
         plan-72b)
@@ -139,14 +139,14 @@ load_plan() {
             INSTANCE_PORT[0]="8000"
             INSTANCE_MODEL[0]="${MODELS_BASE}/Qwen/Qwen3-72B"
             INSTANCE_TP[0]="2"
-            INSTANCE_EXTRA_ARGS[0]="$SHARED_ARGS --quantization fp8 --context-length 81920 --max-running-requests 1 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3-72B-FP8"
+            INSTANCE_EXTRA_ARGS[0]="$SHARED_ARGS --quantization fp8 --context-length 131072 --max-running-requests 1 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3-72B-FP8"
 
             INSTANCE_NAME[1]="gs-27b-fast"
             INSTANCE_GPUS[1]="2"
             INSTANCE_PORT[1]="8001"
             INSTANCE_MODEL[1]="${MODELS_BASE}/Qwen/Qwen3.6-27B"
             INSTANCE_TP[1]="1"
-            INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --context-length 49152 --quantization fp8 --max-running-requests 2 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-27B-FP8"
+            INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --context-length 65536 --quantization fp8 --max-running-requests 2 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-27B-FP8"
             ;;
 
         plan-reasoning)
@@ -161,21 +161,21 @@ load_plan() {
             INSTANCE_PORT[0]="8000"
             INSTANCE_MODEL[0]="${MODELS_BASE}/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
             INSTANCE_TP[0]="1"
-            INSTANCE_EXTRA_ARGS[0]="$SHARED_ARGS --context-length 81920 --quantization fp8 --max-running-requests 1 --served-model-name DeepSeek-R1-Distill-Qwen-32B-FP8"
+            INSTANCE_EXTRA_ARGS[0]="$SHARED_ARGS --context-length 131072 --quantization fp8 --max-running-requests 1 --served-model-name DeepSeek-R1-Distill-Qwen-32B-FP8"
 
             INSTANCE_NAME[1]="gs-35b-moe-code"
             INSTANCE_GPUS[1]="1"
             INSTANCE_PORT[1]="8001"
             INSTANCE_MODEL[1]="${MODELS_BASE}/Qwen/Qwen3.6-35B-A3B"
             INSTANCE_TP[1]="1"
-            INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --context-length 81920 --quantization fp8 --cuda-graph-max-bs 8 --max-running-requests 2 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-35B-A3B-FP8"
+            INSTANCE_EXTRA_ARGS[1]="$SHARED_ARGS --context-length 131072 --quantization fp8 --cuda-graph-max-bs 8 --max-running-requests 2 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-35B-A3B-FP8"
 
             INSTANCE_NAME[2]="gs-27b-fast"
             INSTANCE_GPUS[2]="2"
             INSTANCE_PORT[2]="8002"
             INSTANCE_MODEL[2]="${MODELS_BASE}/Qwen/Qwen3.6-27B"
             INSTANCE_TP[2]="1"
-            INSTANCE_EXTRA_ARGS[2]="$SHARED_ARGS --context-length 49152 --quantization fp8 --max-running-requests 2 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-27B-FP8"
+            INSTANCE_EXTRA_ARGS[2]="$SHARED_ARGS --context-length 65536 --quantization fp8 --max-running-requests 2 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-27B-FP8"
             ;;
 
         *)

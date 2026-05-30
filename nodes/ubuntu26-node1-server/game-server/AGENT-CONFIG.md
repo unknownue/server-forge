@@ -13,9 +13,9 @@ Advantages of local endpoints: no API cost, no rate limits, data locality, speci
 ┌──────────────────────────────────────────────────────────────────┐
 │                       ubuntu26-node1-server                       │
 │                                                                   │
-│  GPU 0: Qwen3.6-27B FP8  ──→  :8000  (128K solo agent)           │
-│  GPU 1: Qwen3.6-35B-A3B   ──→  :8001  (80K MoE, 2 concurrent)    │
-│  GPU 2: Qwen3.6-27B FP8  ──→  :8002  (48K dual subagent)         │
+│  GPU 0: Qwen3.6-27B FP8  ──→  :8000  (192K solo agent)           │
+│  GPU 1: Qwen3.6-35B-A3B   ──→  :8001  (128K MoE, 2 concurrent)    │
+│  GPU 2: Qwen3.6-27B FP8  ──→  :8002  (64K dual subagent)         │
 │  GPU 3: FLUX.2 FP8        ──→  :8188  (ComfyUI)                   │
 │                                                                   │
 │  --reasoning-parser qwen3 active. Thinking OFF by default         │
@@ -27,19 +27,19 @@ Advantages of local endpoints: no API cost, no rate limits, data locality, speci
 
 | Port | Model | Context | Concurrency | Role | Routing |
 |------|-------|---------|------------|------|---------|
-| **:8001** | Qwen3.6-35B-A3B-FP8 (MoE) | 80K | 2 | **Primary** — main session, code gen | `ANTHROPIC_BASE_URL` |
-| :8000 | Qwen3.6-27B-FP8-Long | 128K | 1 | Solo agent — director synthesis, deep overflow | Explicit model override |
-| :8002 | Qwen3.6-27B-FP8 | 48K | 2 | Throughput — QA, quick edits, single-file | Explicit model override |
+| **:8001** | Qwen3.6-35B-A3B-FP8 (MoE) | 128K | 2 | **Primary** — main session, code gen | `ANTHROPIC_BASE_URL` |
+| :8000 | Qwen3.6-27B-FP8-Long | 192K | 1 | Solo agent — director synthesis, deep overflow | Explicit model override |
+| :8002 | Qwen3.6-27B-FP8 | 64K | 2 | Throughput — QA, quick edits, single-file | Explicit model override |
 | :8188 | FLUX.2 FP8 (ComfyUI) | — | — | Image generation | Direct API call |
 
 **Routing for CCGS agents:**
 
 | Task | Model to use | Why |
 |------|-------------|-----|
-| Main CC session | MoE (:8001) | 8× throughput, 80K context, 2 concurrent |
-| Director subagents | Long (:8000) | 128K solo for multi-GDD synthesis |
+| Main CC session | MoE (:8001) | 8× throughput, 128K context, 2 concurrent |
+| Director subagents | Long (:8000) | 192K solo for multi-GDD synthesis |
 | Code gen subagents | MoE (:8001) | Long (:8000) if MoE saturated |
-| QA / quick subagents | Fast (:8002) | 48K, dual concurrent |
+| QA / quick subagents | Fast (:8002) | 64K, dual concurrent |
 
 ## Claude Code Configuration
 
@@ -63,10 +63,10 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL="Qwen3.6-35B-A3B-FP8"
 #    is optional/no-op. Opt-in per-request: thinking: {type: "enabled"}.
 export DISABLE_PROMPT_CACHING=1
 
-# ── Context compaction (80K window matching default :8001, compact at 85% ≈ 68K) ──
-#    When using :8000 (128K): set this to 131072 for full context utilization.
-#    When using :8002 (48K):  serving layer auto-caps max_tokens to prevent overflow.
-export CLAUDE_CODE_AUTO_COMPACT_WINDOW=81920
+# ── Context compaction (128K window matching default :8001, compact at 85% ≈ 109K) ──
+#    When using :8000 (192K): set this to 196608 for full context utilization.
+#    When using :8002 (64K):  serving layer auto-caps max_tokens to prevent overflow.
+export CLAUDE_CODE_AUTO_COMPACT_WINDOW=131072
 export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=85
 
 # ── Optional: friendly model names ──
@@ -86,7 +86,7 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME="Qwen3.6 35B MoE"
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "Qwen3.6-35B-A3B-FP8",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "Qwen3.6-35B-A3B-FP8",
     "DISABLE_PROMPT_CACHING": "1",
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "81920",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "131072",
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "85"
   }
 }
@@ -113,9 +113,9 @@ subagents only load their custom prompt (~1-8K).
 
 | Endpoint | SGLang Context | Main session (after 23K) | /start (34K overhead) | Subagent (1-8K) |
 |----------|---------------|-------------------------|----------------------|-----------------|
-| :8001 (MoE) | 81,920 | ~58K | ~47K | ~73-80K |
-| :8000 (Long) | 131,072 | ~108K | ~97K | ~123-130K |
-| :8002 (Fast) | 49,152 | ~26K* | ~15K* | ~41-48K |
+| :8001 (MoE) | 131,072 | ~108K | ~97K | ~123-130K |
+| :8000 (Long) | 196,608 | ~173K | ~162K | ~188-195K |
+| :8002 (Fast) | 65,536 | ~42K* | ~31K* | ~57-64K |
 
 *Serving layer auto-caps max_tokens to prevent context overflow.
 
@@ -130,21 +130,21 @@ subagents only load their custom prompt (~1-8K).
 
 ### Compaction
 
-- `CLAUDE_CODE_AUTO_COMPACT_WINDOW=81920` — matches default endpoint :8001 (80K)
-- `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=85` — compact at ~68K used
-- When overflowing to :8000 (128K): `export CLAUDE_CODE_AUTO_COMPACT_WINDOW=131072`
-- When switching to :8002 (48K): no config change needed — serving layer auto-caps max_tokens
+- `CLAUDE_CODE_AUTO_COMPACT_WINDOW=131072` — matches default endpoint :8001 (128K)
+- `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=85` — compact at ~109K used
+- When overflowing to :8000 (192K): `export CLAUDE_CODE_AUTO_COMPACT_WINDOW=196608`
+- When switching to :8002 (64K): no config change needed — serving layer auto-caps max_tokens
 - **Do NOT use `CLAUDE_CODE_MAX_CONTEXT_TOKENS`** — requires `DISABLE_COMPACT=1`, which disables compaction entirely
 
 ### Three-Tier Design
 
 | Endpoint | Context | max_running | KV pool | Max usage | Design rationale |
 |----------|---------|------------|---------|-----------|-----------------|
-| Long (:8000) | 131,072 | 1 | 689K | 131K (19%) | 27B Dense. Solo agent, full context, no contention |
-| MoE (:8001) | 81,920 | 2 | 1965K | 164K (8%) | 35B→3B active. Tiny KV per token, massive headroom |
-| Fast (:8002) | 49,152 | 2 | 689K | 98K (14%) | 27B Dense. Dual subagent, good headroom |
+| Long (:8000) | 196,608 | 1 | 789K | 197K (25%) | 27B Dense. Solo agent, full context, no contention |
+| MoE (:8001) | 131,072 | 2 | 2281K | 262K (11%) | 35B→3B active. Tiny KV per token, massive headroom |
+| Fast (:8002) | 65,536 | 2 | 789K | 131K (17%) | 27B Dense. Dual subagent, good headroom |
 
-**Aggregate**: ~861 tok/s text throughput, up to 5 concurrent requests (1+2+2).
+KV pools with mem_fraction=0.92. **Aggregate**: up to 5 concurrent requests.
 
 ## Deployment Commands
 

@@ -10,3 +10,6 @@
 [submodule "submodules/rtx6kpro"]
 	path = submodules/rtx6kpro
 	url = https://github.com/local-inference-lab/rtx6kpro.git
+[submodule "submodules/AIServerSetup"]
+	path = submodules/AIServerSetup
+	url = https://github.com/Teachings/AIServerSetup.git

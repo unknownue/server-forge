@@ -24,6 +24,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FORGE_REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$FORGE_REPO_ROOT/scripts/lib/discover.sh"
 
+# ── Use project venv Python (has hf_xet for large file downloads) ──
+VENV_PYTHON="$FORGE_REPO_ROOT/.venv/bin/python3"
+if [[ ! -x "$VENV_PYTHON" ]]; then
+    echo "ERROR: Project venv not found at $FORGE_REPO_ROOT/.venv" >&2
+    echo "Run: python3 -m venv $FORGE_REPO_ROOT/.venv && $FORGE_REPO_ROOT/.venv/bin/pip install huggingface_hub hf_xet" >&2
+    exit 1
+fi
+
 # ── Load per-node model registry ──
 MODELS_CONF="$FORGE_NODE_DIR/config/models.conf"
 if [[ ! -f "$MODELS_CONF" ]]; then
@@ -63,9 +71,9 @@ GGUF_PATTERNS=(
 )
 
 # ── Ensure huggingface_hub is available ──
-if ! python3 -c "import huggingface_hub" 2>/dev/null; then
-    echo "ERROR: huggingface_hub not installed." >&2
-    echo "Run: sudo bash $FORGE_NODE_DIR/provision/install-packages.sh" >&2
+if ! "$VENV_PYTHON" -c "import huggingface_hub" 2>/dev/null; then
+    echo "ERROR: huggingface_hub not installed in project venv." >&2
+    echo "Run: $FORGE_REPO_ROOT/.venv/bin/pip install huggingface_hub hf_xet" >&2
     exit 1
 fi
 
@@ -175,8 +183,20 @@ for entry in "${TARGETS[@]}"; do
         PY_FILTER="allow_patterns=[$(printf "'%s'," "${ALLOW_PATTERNS[@]}")],"
     fi
 
-    if python3 -c "
-from huggingface_hub import snapshot_download
+    if "$VENV_PYTHON" -c "
+import re
+from huggingface_hub import snapshot_download, constants
+
+# Models like DeepSeek-V4 have individual safetensors shards that
+# exceed huggingface_hub's conservative 50 GB HTTP download limit.
+# Bump it to 200 GB — the mirror CDN handles large files fine, and
+# http_get already supports Range-based resume.
+constants.MAX_HTTP_DOWNLOAD_SIZE = 200 * 1000 * 1000 * 1000
+
+# Disable Xet: mirrors (hf-mirror.com) issue tokens that the Xet CAS
+# server (cas-server.xethub.hf.co) rejects with 401.
+constants.HF_HUB_DISABLE_XET = True
+
 path = snapshot_download(
     '$MODEL_ID',
     revision='$REVISION',

@@ -1,0 +1,35 @@
+# Example docker-compose for running the DSV4-Flash MTP vLLM image locally.
+# Edit MODEL_HOST_PATH to point at the HF snapshot you've downloaded.
+version: "3.9"
+
+services:
+  dsv4-flash:
+    image: dsv4-flash-acti-mtp:0.1.0
+    container_name: dsv4-flash
+    restart: unless-stopped
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: ["gpu"]
+              count: all
+    shm_size: "16gb"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${MODEL_HOST_PATH:-/home/ripper/dsv4-local/models/DeepSeek-V4-Flash-Acti-MTP-W4A16-FP8-GPTQ}:/models/DeepSeek-V4-Flash-Acti-MTP-W4A16-FP8:ro
+      - dsv4_cache:/root/.cache
+    environment:
+      MODEL_PATH: /models/DeepSeek-V4-Flash-Acti-MTP-W4A16-FP8
+      # Override any of the Dockerfile defaults here, e.g.:
+      # MAX_MODEL_LEN: 131072
+      # MAX_NUM_SEQS: 8
+      # GPU_MEMORY_UTILIZATION: 0.90
+
+volumes:
+  dsv4_cache:

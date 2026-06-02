@@ -1,6 +1,12 @@
 #!/bin/bash
+# Stop and remove Web Studio Server containers.
+set -euo pipefail
+
 echo "Stopping Web Studio Server..."
-for cid in $(docker ps -q --filter "name=ws-"); do
-    docker stop "$cid" 2>/dev/null || true
+
+for cid in $(docker ps -a -q --filter "name=ws-" 2>/dev/null); do
+    echo "  Removing $cid..."
+    docker rm -f "$cid" 2>/dev/null || true
 done
-echo "All stopped."
+
+echo "All stopped and removed."

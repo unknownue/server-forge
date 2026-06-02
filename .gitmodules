@@ -13,3 +13,9 @@
 [submodule "submodules/AIServerSetup"]
 	path = submodules/AIServerSetup
 	url = https://github.com/Teachings/AIServerSetup.git
+[submodule "submodules/docker-pull-tar"]
+	path = submodules/docker-pull-tar
+	url = https://github.com/topcss/docker-pull-tar
+[submodule "submodules/CLASP"]
+	path = submodules/CLASP
+	url = https://github.com/jedarden/CLASP

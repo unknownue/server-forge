@@ -1,0 +1,83 @@
+# DeepSeek-V4-Flash + CLASP Proxy — Full Stack
+#
+# vLLM serves the model (OpenAI protocol only).
+# CLASP translates Anthropic /v1/messages → OpenAI /v1/chat/completions.
+#
+# Usage:
+#   MODEL_PATH=/data/work/models/LordNeel/DeepSeek-V4-Flash-Acti-MTP-W4A16-FP8 \
+#     docker compose -f docker-compose.yml up -d
+#
+#   # Or with profile overrides:
+#   MAX_MODEL_LEN=131072 MAX_NUM_SEQS=1 docker compose up -d
+
+version: "3.9"
+
+services:
+  # ── vLLM Inference Backend ──
+  vllm:
+    image: dsv4-flash-acti-mtp:0.1.0
+    container_name: dsv4-flash
+    restart: unless-stopped
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0", "1"]
+              capabilities: [gpu]
+    ipc: host
+    shm_size: "64gb"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${MODEL_PATH:-/data/work/models/LordNeel/DeepSeek-V4-Flash-Acti-MTP-W4A16-FP8}:/models/DeepSeek-V4-Flash-Acti-MTP-W4A16-FP8:ro
+      - dsv4_cache:/root/.cache
+      - ${HF_CACHE_PATH:-~/.cache/huggingface}:/root/.cache/huggingface
+    environment:
+      MODEL_PATH: /models/DeepSeek-V4-Flash-Acti-MTP-W4A16-FP8
+      TENSOR_PARALLEL_SIZE: ${TENSOR_PARALLEL_SIZE:-2}
+      MAX_MODEL_LEN: ${MAX_MODEL_LEN:-4096}
+      MAX_NUM_SEQS: ${MAX_NUM_SEQS:-1}
+      MAX_NUM_BATCHED_TOKENS: ${MAX_NUM_BATCHED_TOKENS:-4096}
+      GPU_MEMORY_UTILIZATION: ${GPU_MEMORY_UTILIZATION:-0.97}
+      BLOCK_SIZE: 256
+      DISABLE_CUSTOM_ALL_REDUCE: 1
+      ENABLE_MTP: ${ENABLE_MTP:-1}
+      PORT: 8000
+      # NCCL tuning
+      NCCL_P2P_DISABLE: 1
+      NCCL_IB_DISABLE: 1
+      NCCL_SHM_DISABLE: 0
+      NCCL_PROTO: LL
+      NCCL_ALGO: Ring
+      NCCL_MIN_NCHANNELS: 8
+      NCCL_NTHREADS: 512
+      NCCL_DEBUG: WARN
+      # Disable CUDA graphs to save VRAM
+      VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: 0
+
+  # ── CLASP Anthropic → OpenAI Proxy ──
+  clasp:
+    image: ghcr.io/jedarden/clasp:latest
+    container_name: dsv4-clasp
+    restart: unless-stopped
+    command: ["-proxy-only", "-port", "8080"]
+    ports:
+      - "${CLASP_PORT:-8080}:8080"
+    environment:
+      PROVIDER: custom
+      CUSTOM_BASE_URL: http://vllm:8000/v1
+      CUSTOM_API_KEY: EMPTY
+      CLASP_MODEL: ${CLASP_MODEL:-deepseek-v4-flash}
+      CLASP_MODEL_OPUS: ${CLASP_MODEL_OPUS:-deepseek-v4-flash}
+      CLASP_MODEL_SONNET: ${CLASP_MODEL_SONNET:-deepseek-v4-flash}
+      CLASP_MODEL_HAIKU: ${CLASP_MODEL_HAIKU:-deepseek-v4-flash}
+    depends_on:
+      - vllm
+
+volumes:
+  dsv4_cache:

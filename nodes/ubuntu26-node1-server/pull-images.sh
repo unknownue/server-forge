@@ -5,8 +5,10 @@
 set -euo pipefail
 
 IMAGES=(
-    "vllm/vllm-openai:v0.20.2-cu129-ubuntu2404"
+    "voipmonitor/sglang:test-cu132"
     "nvcr.io/nvidia/sglang:26.04-py3"
+    "yanwk/comfyui-boot:cu128-slim"
+    "jedarden/clasp:latest"
 )
 
 echo "=== Pulling Docker images ==="

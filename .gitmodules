@@ -19,3 +19,6 @@
 [submodule "submodules/CLASP"]
 	path = submodules/CLASP
 	url = https://github.com/jedarden/CLASP
+[submodule "submodules/cc-relay"]
+	path = submodules/cc-relay
+	url = https://github.com/omarluq/cc-relay.git

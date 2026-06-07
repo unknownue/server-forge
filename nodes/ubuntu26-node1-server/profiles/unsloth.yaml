@@ -1,0 +1,18 @@
+# Unsloth Studio: full GPU training/fine-tuning
+name: "unsloth"
+description: "Unsloth Studio — all 4 GPUs for training and fine-tuning"
+version: "1.0"
+
+gpu_allocation:
+  - gpu: [0, 1, 2, 3]
+    role: "training"
+    model: "Unsloth Studio"
+    port: 8888
+    container_name: "unsloth"
+    serve:
+      script: "unsloth/deploy.sh"
+      args: []
+      use_deploy_sh: true
+
+stop_containers:
+  - "unsloth"

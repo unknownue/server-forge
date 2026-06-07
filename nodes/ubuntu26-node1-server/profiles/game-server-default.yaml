@@ -1,0 +1,65 @@
+# Game Studio Default: 2×27B FP8 + 35B-A3B MoE + FLUX.2 FP8
+name: "game-server-default"
+description: "Game Studio: 2×27B Dense + 35B-A3B MoE + FLUX.2 image gen"
+version: "1.0"
+
+gpu_allocation:
+  - gpu: [0]
+    role: "text-inference"
+    model: "Qwen/Qwen3.6-27B"
+    model_short: "Qwen3.6-27B-FP8-Long"
+    port: 8000
+    container_name: "gs-27b-long"
+    serve:
+      script: "serve/sglang-text.sh"
+      args:
+        - "/data/work/models/Qwen/Qwen3.6-27B"
+        - "0"
+        - "8000"
+        - "1"
+        - "--context-length 196608 --quantization fp8 --max-running-requests 1 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-27B-FP8-Long"
+
+  - gpu: [1]
+    role: "text-inference"
+    model: "Qwen/Qwen3.6-35B-A3B"
+    model_short: "Qwen3.6-35B-A3B-FP8"
+    port: 8001
+    container_name: "gs-35b-moe-code"
+    serve:
+      script: "serve/sglang-text.sh"
+      args:
+        - "/data/work/models/Qwen/Qwen3.6-35B-A3B"
+        - "1"
+        - "8001"
+        - "1"
+        - "--context-length 131072 --quantization fp8 --cuda-graph-max-bs 8 --max-running-requests 2 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-35B-A3B-FP8"
+
+  - gpu: [2]
+    role: "text-inference"
+    model: "Qwen/Qwen3.6-27B"
+    model_short: "Qwen3.6-27B-FP8"
+    port: 8002
+    container_name: "gs-27b-fast"
+    serve:
+      script: "serve/sglang-text.sh"
+      args:
+        - "/data/work/models/Qwen/Qwen3.6-27B"
+        - "2"
+        - "8002"
+        - "1"
+        - "--context-length 65536 --quantization fp8 --max-running-requests 2 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-27B-FP8"
+
+  - gpu: [3]
+    role: "image-generation"
+    model: "FLUX.2-dev"
+    port: 8188
+    container_name: "gs-comfyui"
+    serve:
+      script: "serve/comfyui.sh"
+      args: ["3", "8188"]
+
+stop_containers:
+  - "gs-27b-long"
+  - "gs-35b-moe-code"
+  - "gs-27b-fast"
+  - "gs-comfyui"

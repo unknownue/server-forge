@@ -152,6 +152,85 @@ ENV{DEVNAME}=="/dev/dri/card0", TAG+="mutter-device-preferred-primary"
 EOF
 ```
 
+## Directory Structure
+
+```
+ubuntu26-node1-server/
+├── README.md, hardware-info.txt, download-model.sh, pull-images.sh
+├── config/              # Node-level config (models.conf, git, docker registry)
+├── provision/           # OS provisioning scripts (one-shot, root)
+├── bench/               # Benchmark scripts and results
+│
+├── images/              # Docker image build contexts
+│   ├── sglang/          #   SGLang patches (Anthropic API support)
+│   ├── anthropic-proxy/ #   Anthropic↔OpenAI translation proxy
+│   └── dsv4-vllm/       #   DeepSeek-V4-Flash vLLM (patched fork + MTP)
+│
+├── profiles/            # GPU card allocation profiles (one YAML = one config)
+│   ├── game-server-*.yaml    #   Game Studio (3 text + image gen)
+│   ├── web-server-*.yaml     #   Web Studio (4 text)
+│   ├── dsv4-flash-*.yaml     #   DeepSeek-V4-Flash (2-GPU TP=2)
+│   ├── unsloth.yaml          #   Unsloth Studio (all GPUs, training)
+│   └── docs/                 #   Preserved documentation from old directories
+│
+├── serve/               # Unified service launch scripts
+│   ├── sglang-text.sh   #   Start SGLang text inference (Dense/MoE)
+│   ├── sglang-vl.sh     #   Start SGLang Vision-Language model
+│   ├── comfyui.sh       #   Start ComfyUI image generation
+│   └── clasp-proxy.sh   #   Start CLASP Anthropic proxy
+│
+├── unsloth/             # Unsloth Studio (independent Dockerfile + patches)
+│
+└── service-hub/         # Local service management gateway
+    ├── pyproject.toml   #   uv project definition
+    ├── deploy.sh        #   Start the management service
+    └── src/service_hub/ #   FastAPI server + GPU monitor + profile executor
+```
+
+## Service Hub
+
+The Service Hub is the local service management gateway — the single HTTP entry
+point for querying GPU card status and switching between pre-defined service
+profiles on this machine.
+
+### Quick Start
+
+```bash
+# Install uv if not already installed
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Start the service (from repo root)
+make service-hub
+
+# API docs: http://localhost:9090/docs
+```
+
+### API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/gpus` | Query all GPU cards with real-time status |
+| `GET` | `/gpus/{id}` | Query a single GPU |
+| `GET` | `/profiles` | List all available profiles |
+| `GET` | `/profiles/{name}` | View profile details |
+| `GET` | `/current` | Current active profile |
+| `POST` | `/switch/{name}` | Switch to a profile (stops old, starts new) |
+| `POST` | `/stop` | Stop all managed containers |
+| `GET` | `/health` | Management service health check |
+
+### Example: Switch Profile
+
+```bash
+# Switch to DeepSeek-V4-Flash
+curl -X POST http://localhost:9090/switch/dsv4-flash-default
+
+# Switch to Game Studio
+curl -X POST http://localhost:9090/switch/game-server-default
+
+# Query GPU status
+curl http://localhost:9090/gpus | python3 -m json.tool
+```
+
 ## Maintenance Log
 
 | Date | Issue / Action | Resolution |

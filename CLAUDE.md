@@ -40,6 +40,14 @@ server-forge/
 │       └── unsloth/                 #     Custom Unsloth Studio Docker image
 │                                   #   Copy an existing similar node to create a new one
 │
+│   ubuntu26-node1-server/           #   4×RTX 5090 — multi-profile inference node
+│       ├── serve/                   #     Container launchers (sglang-text, sglang-vl, comfyui, clasp-proxy)
+│       ├── profiles/                #     YAML service profiles (game-server, web-server, dsv4-flash, unsloth)
+│       ├── service-hub/             #     Web management UI (FastAPI + Vue) — profile switching & stop all
+│       ├── images/                  #     Custom Docker images (anthropic-proxy, dsv4-vllm, sglang)
+│       ├── bench/                   #     SGLang & NCCL benchmarks
+│       └── unsloth/                 #     Unsloth Studio custom image
+│
 ├── inventory/
 │   └── hosts.yml                    # Fleet index (summary of all nodes)
 │

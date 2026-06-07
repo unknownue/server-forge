@@ -1,0 +1,21 @@
+# DeepSeek-V4-Flash 4-GPU: 524K max context, 2 concurrent
+name: "dsv4-flash-4gpu-524k"
+description: "DeepSeek-V4-Flash 284B MoE, 4-GPU TP=4, 524K×2 max-context"
+version: "1.0"
+
+gpu_allocation:
+  - gpu: [0, 1, 2, 3]
+    role: "text-inference"
+    model: "LordNeel/DeepSeek-V4-Flash-Acti-MTP-W4A16-FP8"
+    model_short: "deepseek-v4-flash"
+    port: 8000
+    tp: 4
+    container_name: "dsv4-flash"
+    serve:
+      script: "images/dsv4-vllm/deploy.sh"
+      args: ["plan-4gpu-524k"]
+      use_deploy_sh: true
+
+stop_containers:
+  - "dsv4-flash"
+  - "dsv4-clasp"

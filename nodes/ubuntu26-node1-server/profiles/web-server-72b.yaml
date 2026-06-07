@@ -1,0 +1,57 @@
+# Web Studio 72B: 72B Dense TP=2 + 2×27B + Anthropic proxy
+name: "web-server-72b"
+description: "Web Studio: 72B Dense (TP=2) + 2×27B, all text inference"
+version: "1.0"
+
+gpu_allocation:
+  - gpu: [0, 1]
+    role: "text-inference"
+    model: "Qwen/Qwen3-72B"
+    model_short: "Qwen3-72B-FP8"
+    port: 8000
+    tp: 2
+    container_name: "ws-72b-coord"
+    serve:
+      script: "serve/sglang-text.sh"
+      args:
+        - "/data/work/models/Qwen/Qwen3-72B"
+        - "0,1"
+        - "8000"
+        - "2"
+        - "--quantization fp8 --context-length 131072 --max-running-requests 1 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3-72B-FP8"
+
+  - gpu: [2]
+    role: "text-inference"
+    model: "Qwen/Qwen3.6-27B"
+    model_short: "Qwen3.6-27B-FP8"
+    port: 8001
+    container_name: "ws-27b-2"
+    serve:
+      script: "serve/sglang-text.sh"
+      args:
+        - "/data/work/models/Qwen/Qwen3.6-27B"
+        - "2"
+        - "8001"
+        - "1"
+        - "--context-length 40960 --quantization fp8 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-27B-FP8"
+
+  - gpu: [3]
+    role: "text-inference"
+    model: "Qwen/Qwen3.6-27B"
+    model_short: "Qwen3.6-27B-FP8"
+    port: 8002
+    container_name: "ws-27b-3"
+    serve:
+      script: "serve/sglang-text.sh"
+      args:
+        - "/data/work/models/Qwen/Qwen3.6-27B"
+        - "3"
+        - "8002"
+        - "1"
+        - "--context-length 40960 --quantization fp8 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-27B-FP8"
+
+stop_containers:
+  - "ws-72b-coord"
+  - "ws-27b-2"
+  - "ws-27b-3"
+  - "ws-proxy"

@@ -1,0 +1,82 @@
+# Web Studio Default: 3×27B + 35B-A3B MoE + Anthropic proxy
+name: "web-server-default"
+description: "Web Studio: 3×27B Dense + 35B-A3B MoE, all text inference"
+version: "1.0"
+
+gpu_allocation:
+  - gpu: [0]
+    role: "text-inference"
+    model: "Qwen/Qwen3.6-27B"
+    model_short: "Qwen3.6-27B-FP8"
+    port: 8000
+    container_name: "ws-27b-0"
+    serve:
+      script: "serve/sglang-text.sh"
+      args:
+        - "/data/work/models/Qwen/Qwen3.6-27B"
+        - "0"
+        - "8000"
+        - "1"
+        - "--context-length 40960 --quantization fp8 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-27B-FP8"
+
+  - gpu: [1]
+    role: "text-inference"
+    model: "Qwen/Qwen3.6-35B-A3B"
+    model_short: "Qwen3.6-35B-A3B-FP8"
+    port: 8001
+    container_name: "ws-35b-moe"
+    serve:
+      script: "serve/sglang-text.sh"
+      args:
+        - "/data/work/models/Qwen/Qwen3.6-35B-A3B"
+        - "1"
+        - "8001"
+        - "1"
+        - "--context-length 40960 --quantization fp8 --cuda-graph-max-bs 8 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-35B-A3B-FP8"
+
+  - gpu: [2]
+    role: "text-inference"
+    model: "Qwen/Qwen3.6-27B"
+    model_short: "Qwen3.6-27B-FP8"
+    port: 8002
+    container_name: "ws-27b-2"
+    serve:
+      script: "serve/sglang-text.sh"
+      args:
+        - "/data/work/models/Qwen/Qwen3.6-27B"
+        - "2"
+        - "8002"
+        - "1"
+        - "--context-length 40960 --quantization fp8 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-27B-FP8"
+
+  - gpu: [3]
+    role: "text-inference"
+    model: "Qwen/Qwen3.6-27B"
+    model_short: "Qwen3.6-27B-FP8"
+    port: 8003
+    container_name: "ws-27b-3"
+    serve:
+      script: "serve/sglang-text.sh"
+      args:
+        - "/data/work/models/Qwen/Qwen3.6-27B"
+        - "3"
+        - "8003"
+        - "1"
+        - "--context-length 40960 --quantization fp8 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-27B-FP8"
+
+  # Anthropic proxy (CPU-only, no GPU)
+  - gpu: []
+    role: "proxy"
+    model: "anthropic-proxy"
+    port: 8090
+    container_name: "ws-proxy"
+    serve:
+      script: "serve/sglang-text.sh"  # placeholder — proxy started separately
+      skip: true
+
+stop_containers:
+  - "ws-27b-0"
+  - "ws-35b-moe"
+  - "ws-27b-2"
+  - "ws-27b-3"
+  - "ws-proxy"

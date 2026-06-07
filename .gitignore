@@ -3,3 +3,10 @@ tmp/
 .venv/
 .vscode/settings.json
 provision/nvidia-ctk-debs/
+
+
+nodes/ubuntu26-node1-server/service-hub/frontend/node_modules
+nodes/ubuntu26-node1-server/service-hub/frontend/package-lock.json
+nodes/ubuntu26-node1-server/service-hub/.state.json
+
+*.pyc

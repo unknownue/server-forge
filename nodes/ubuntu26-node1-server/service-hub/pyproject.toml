@@ -1,0 +1,14 @@
+[project]
+name = "service-hub"
+version = "0.1.0"
+description = "Local service management gateway for ubuntu26-node1-server"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "pyyaml>=6.0",
+    "httpx>=0.28.0",
+]
+
+[project.scripts]
+service-hub = "service_hub.server:main"

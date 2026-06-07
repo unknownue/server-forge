@@ -1,0 +1,72 @@
+# Web Studio Reasoning: R1-Distill-32B + MoE + 2×27B + Anthropic proxy
+name: "web-server-reasoning"
+description: "Web Studio: R1-Distill-32B + MoE + 2×27B, all text inference"
+version: "1.0"
+
+gpu_allocation:
+  - gpu: [0]
+    role: "text-inference"
+    model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
+    model_short: "DeepSeek-R1-Distill-Qwen-32B-FP8"
+    port: 8000
+    container_name: "ws-r1-reason"
+    serve:
+      script: "serve/sglang-text.sh"
+      args:
+        - "/data/work/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
+        - "0"
+        - "8000"
+        - "1"
+        - "--context-length 131072 --quantization fp8 --max-running-requests 1 --served-model-name DeepSeek-R1-Distill-Qwen-32B-FP8"
+
+  - gpu: [1]
+    role: "text-inference"
+    model: "Qwen/Qwen3.6-35B-A3B"
+    model_short: "Qwen3.6-35B-A3B-FP8"
+    port: 8001
+    container_name: "ws-35b-moe"
+    serve:
+      script: "serve/sglang-text.sh"
+      args:
+        - "/data/work/models/Qwen/Qwen3.6-35B-A3B"
+        - "1"
+        - "8001"
+        - "1"
+        - "--context-length 40960 --quantization fp8 --cuda-graph-max-bs 8 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-35B-A3B-FP8"
+
+  - gpu: [2]
+    role: "text-inference"
+    model: "Qwen/Qwen3.6-27B"
+    model_short: "Qwen3.6-27B-FP8"
+    port: 8002
+    container_name: "ws-27b-2"
+    serve:
+      script: "serve/sglang-text.sh"
+      args:
+        - "/data/work/models/Qwen/Qwen3.6-27B"
+        - "2"
+        - "8002"
+        - "1"
+        - "--context-length 40960 --quantization fp8 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-27B-FP8"
+
+  - gpu: [3]
+    role: "text-inference"
+    model: "Qwen/Qwen3.6-27B"
+    model_short: "Qwen3.6-27B-FP8"
+    port: 8003
+    container_name: "ws-27b-3"
+    serve:
+      script: "serve/sglang-text.sh"
+      args:
+        - "/data/work/models/Qwen/Qwen3.6-27B"
+        - "3"
+        - "8003"
+        - "1"
+        - "--context-length 40960 --quantization fp8 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --served-model-name Qwen3.6-27B-FP8"
+
+stop_containers:
+  - "ws-r1-reason"
+  - "ws-35b-moe"
+  - "ws-27b-2"
+  - "ws-27b-3"
+  - "ws-proxy"

@@ -62,6 +62,12 @@ docker run --rm \
     "/models" \
     --served-model-name "$MODEL_NAME" \
     --tensor-parallel-size 1 \
-    --max-model-len 32768 \
+    --gpu-memory-utilization 0.93 \
+    --max-model-len 40960 \
+    --max-num-seqs 32 \
+    --enable-prefix-caching \
+    --tool-call-parser hermes \
+    --enable-auto-tool-choice \
+    --reasoning-parser deepseek_r1 \
     --host 0.0.0.0 \
     --port 8000

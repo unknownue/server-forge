@@ -1,6 +1,9 @@
 # cc-relay Configuration — unknownue-manjaro
 #
 # Proxy for Claude Code to route requests across multiple AI providers.
+# Routes: Nemotron-Orchestrator → local CLASP → vLLM
+#         Qwen3.6-35B-* → remote SGLang :8001 (MoE)
+#         Qwen3.6-27B-* → remote SGLang :8000 (Long context)
 
 server:
   listen: "127.0.0.1:8787"
@@ -9,36 +12,47 @@ server:
   enable_http2: true
 
   auth:
-    allow_subscription: true
+    api_key: "not-needed"
 
 routing:
-  strategy: "failover"
-  failover_timeout: 5000
+  strategy: "model_based"
+  model_mapping:
+    "Nemotron-Orchestrator": "local-nemotron"
+    "Qwen3.6-35B": "remote-moe"
+    "Qwen3.6-27B": "remote-long"
+  default_provider: "remote-moe"
   debug: false
 
 providers:
-  - name: "anthropic"
+  # ── Local nemotron-orchestrator (via CLASP Anthropic→OpenAI proxy) ──
+  - name: "local-nemotron"
     type: "anthropic"
     enabled: true
+    base_url: "http://127.0.0.1:8080"
     models:
-      - "claude-opus-4-6"
-      - "claude-sonnet-4-5-20250514"
-      - "claude-haiku-4-5-20251001"
+      - "Nemotron-Orchestrator-8B-AWQ-8bit"
     keys:
-      - key: "${ANTHROPIC_API_KEY}"
-        rpm_limit: 60
-        tpm_limit: 100000
+      - key: "dummy"
 
-  - name: "ollama"
-    type: "ollama"
+  # ── Remote game server :8001 — MoE (128K, 2 concurrent) ──
+  - name: "remote-moe"
+    type: "anthropic"
     enabled: true
-    base_url: "http://localhost:11434"
-    model_mapping:
-      "claude-opus-4-6": "qwen3:72b"
-      "claude-sonnet-4-5-20250514": "qwen3:32b"
-      "claude-sonnet-4-5": "qwen3:32b"
-      "claude-haiku-4-5-20251001": "qwen3:8b"
-      "claude-haiku-4-5": "qwen3:8b"
+    base_url: "http://192.168.50.135:8001"
+    models:
+      - "Qwen3.6-35B-A3B-FP8"
+    keys:
+      - key: "not-needed"
+
+  # ── Remote game server :8000 — Long context (192K, solo) ──
+  - name: "remote-long"
+    type: "anthropic"
+    enabled: true
+    base_url: "http://192.168.50.135:8000"
+    models:
+      - "Qwen3.6-27B-FP8"
+    keys:
+      - key: "not-needed"
 
 cache:
   mode: single

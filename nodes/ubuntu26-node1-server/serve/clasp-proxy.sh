@@ -69,10 +69,10 @@ start_clasp() {
         -e "PROVIDER=custom" \
         -e "CUSTOM_BASE_URL=http://host.docker.internal:$VLLM_PORT/v1" \
         -e "CUSTOM_API_KEY=EMPTY" \
-        -e "CLASP_MODEL=deepseek-v4-flash" \
-        -e "CLASP_MODEL_OPUS=deepseek-v4-flash" \
-        -e "CLASP_MODEL_SONNET=deepseek-v4-flash" \
-        -e "CLASP_MODEL_HAIKU=deepseek-v4-flash" \
+        -e "CLASP_MODEL=Qwen3.6-27B-FP8" \
+        -e "CLASP_MODEL_OPUS=Qwen3.6-27B-FP8" \
+        -e "CLASP_MODEL_SONNET=Qwen3.6-27B-FP8" \
+        -e "CLASP_MODEL_HAIKU=Qwen3.6-27B-FP8" \
         "$CLASP_IMAGE" \
         -proxy-only -port 8080
 
@@ -105,7 +105,7 @@ smoke_test() {
         -X POST "http://localhost:$CLASP_PORT/v1/messages" \
         -H "Content-Type: application/json" \
         -H "x-api-key: dummy" \
-        -d '{"model":"deepseek-v4-flash","max_tokens":32,
+        -d '{"model":"Qwen3.6-27B-FP8","max_tokens":32,
              "messages":[{"role":"user","content":"Reply with exactly: PROXY_OK"}]}' \
         2>/dev/null)
 

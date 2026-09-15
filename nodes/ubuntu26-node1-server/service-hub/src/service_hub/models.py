@@ -98,6 +98,7 @@ class StopResult(BaseModel):
     status: str
     stopped_containers: list[str] = Field(default_factory=list)
     elapsed_seconds: float = 0
+    error: Optional[str] = None
 
 
 class SwitchHistoryEntry(BaseModel):

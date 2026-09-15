@@ -109,13 +109,15 @@ async def stop_containers(container_names: list[str]) -> list[str]:
     return stopped
 
 
-async def start_profile_services(profile: ProfileDetail) -> tuple[list[str], list[str]]:
+async def start_profile_services(profile: ProfileDetail) -> tuple[list[str], list[str], list[tuple[str, str]]]:
     """Start services defined in a profile.
 
-    Returns (started_containers, skipped_services).
+    Returns (started_containers, skipped_services, failures), where failures is a
+    list of (service, error_detail) for every serve script that exited non-zero.
     """
     started = []
     skipped = []
+    failures = []
 
     for alloc in profile.gpu_allocation:
         serve = alloc.get("serve", {})
@@ -130,7 +132,9 @@ async def start_profile_services(profile: ProfileDetail) -> tuple[list[str], lis
 
         script_path = NODE_DIR / script
         if not script_path.exists():
-            logger.error("Serve script not found: %s", script_path)
+            msg = f"serve script not found: {script_path}"
+            logger.error(msg)
+            failures.append((script, msg))
             continue
 
         args = serve.get("args", [])
@@ -146,17 +150,42 @@ async def start_profile_services(profile: ProfileDetail) -> tuple[list[str], lis
         rc, stdout, stderr = await _run(cmd, cwd=NODE_DIR, timeout=600, env=serve_env)
 
         if rc != 0:
-            logger.error("Failed to start %s: %s", script, stderr[-500:] if stderr else "")
+            detail = (stderr + stdout)[-300:].strip() or "no output"
+            logger.error("Failed to start %s: %s", script, detail)
+            failures.append((script, detail))
         else:
             if container_name:
                 started.append(container_name)
             logger.info("Service started: %s", script)
 
-    return started, skipped
+    return started, skipped, failures
+
+
+# Serialize switch/stop operations. A concurrent second request would otherwise
+# run its stop phase against containers the first request is still booting,
+# killing the in-flight startup and recording a "successful" state for a
+# profile that never came up.
+_switch_lock = asyncio.Lock()
+
+
+def switch_in_progress() -> bool:
+    """Whether a switch/stop operation is currently running."""
+    return _switch_lock.locked()
 
 
 async def switch_profile(name: str, profiles: dict[str, ProfileDetail], force: bool = False) -> SwitchResult:
     """Switch to a named profile: stop old services, start new ones."""
+    if _switch_lock.locked():
+        return SwitchResult(
+            status="error",
+            new_profile=name,
+            error="Another switch or stop is already in progress — please retry after it completes.",
+        )
+    async with _switch_lock:
+        return await _do_switch(name, profiles, force)
+
+
+async def _do_switch(name: str, profiles: dict[str, ProfileDetail], force: bool = False) -> SwitchResult:
     start_time = time.time()
 
     if name not in profiles:
@@ -198,50 +227,73 @@ async def switch_profile(name: str, profiles: dict[str, ProfileDetail], force: b
 
     # Step 2: Start new profile services
     logger.info("Starting profile: %s", name)
-    started, skipped = await start_profile_services(target)
+    started, skipped, failures = await start_profile_services(target)
     all_started.extend(started)
     all_skipped.extend(skipped)
 
-    # Step 3: Update state
+    # Step 3: Update state — reflect failures instead of always reporting success.
     elapsed = time.time() - start_time
-    state["current_profile"] = name
+    if failures and not started:
+        status = "error"
+        error_msg = "Failed to start: " + "; ".join(f"{s}: {e}" for s, e in failures)
+        # Everything was stopped and nothing came up — the profile is not active.
+        state["current_profile"] = None
+    elif failures:
+        status = "partial"
+        error_msg = "Partially started: " + "; ".join(f"{s}: {e}" for s, e in failures)
+        state["current_profile"] = name
+    else:
+        status = "success"
+        error_msg = None
+        state["current_profile"] = name
+
     state["last_switch_at"] = datetime.now(timezone.utc).isoformat()
     history = state.get("switch_history", [])
-    history.append({
+    entry = {
         "from_profile": current,
         "to_profile": name,
         "at": state["last_switch_at"],
-        "status": "success",
+        "status": "success" if status == "success" else "failed",
         "elapsed_seconds": round(elapsed, 1),
-    })
+    }
+    if error_msg:
+        entry["error"] = error_msg
+    history.append(entry)
     state["switch_history"] = history[-50:]
     save_state(state)
 
     return SwitchResult(
-        status="success",
+        status=status,
         previous_profile=current,
         new_profile=name,
         stopped_containers=all_stopped,
         started_containers=all_started,
         skipped_services=all_skipped,
         elapsed_seconds=round(elapsed, 1),
+        error=error_msg,
     )
 
 
-async def stop_all(profiles: dict[str, ProfileDetail]) -> tuple[list[str], float]:
-    """Stop all managed containers. Returns (stopped_names, elapsed_seconds)."""
-    start_time = time.time()
+async def stop_all(profiles: dict[str, ProfileDetail]) -> tuple[list[str], float, Optional[str]]:
+    """Stop all managed containers.
 
-    all_container_names = set()
-    for p in profiles.values():
-        all_container_names.update(p.stop_containers)
+    Returns (stopped_names, elapsed_seconds, error). Serialized against switches.
+    """
+    if _switch_lock.locked():
+        return [], 0.0, "Another switch or stop is already in progress — please retry after it completes."
+    async with _switch_lock:
+        start_time = time.time()
 
-    stopped = await stop_containers(list(all_container_names))
-    elapsed = time.time() - start_time
+        all_container_names = set()
+        for p in profiles.values():
+            all_container_names.update(p.stop_containers)
 
-    state = load_state()
-    state["current_profile"] = None
-    state["last_switch_at"] = datetime.now(timezone.utc).isoformat()
-    save_state(state)
+        stopped = await stop_containers(list(all_container_names))
+        elapsed = time.time() - start_time
 
-    return stopped, round(elapsed, 1)
+        state = load_state()
+        state["current_profile"] = None
+        state["last_switch_at"] = datetime.now(timezone.utc).isoformat()
+        save_state(state)
+
+        return stopped, round(elapsed, 1), None

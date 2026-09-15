@@ -100,12 +100,12 @@ GPU 2:   Qwen3.6-27B FP8 TP=1 → :8001
 GPU 3:   FLUX.2 FP8  ComfyUI  → :8188
 ```
 
-### Plan Reasoning — Deep CoT + MoE
+### Plan Reasoning — Dual 27B + MoE
 
-Download `deepseek-ai/DeepSeek-R1-Distill-Qwen-32B` first.
+Uses two Qwen3.6-27B instances for deep reasoning + MoE for code generation.
 
 ```
-GPU 0: R1-Distill-32B  FP8 TP=1 → :8000
+GPU 0: Qwen3.6-27B     FP8 TP=1 → :8000
 GPU 1: Qwen3.6-35B-A3B FP8 TP=1 → :8001 (MoE)
 GPU 2: Qwen3.6-27B     FP8 TP=1 → :8002
 GPU 3: FLUX.2 FP8      ComfyUI  → :8188
@@ -123,7 +123,6 @@ All numbers assume FP8 KV cache (`--kv-cache-dtype fp8_e5m2`).
 | Qwen3.6-27B | 27B Dense | 26 GB | 57.6 GB | 256 KB | 29 |
 | Qwen3.6-35B-A3B | 35B MoE (3B active) | 34.5 GB (FP8) | 18.7 GB | 256 KB | 39 |
 | Qwen3-72B | 72B Dense | 72 GB (TP2) | 47.6 GB/each | 512 KB | 38 |
-| R1-Distill-32B | 32B Dense | 31 GB | 52.6 GB | 256 KB | 53 |
 
 ### Default Plan Concurrency
 
@@ -160,7 +159,6 @@ FLUX.2 uses custom patterns to download only FP8 files (skips BF16/FP4 text enco
 ```bash
 # Alternative plans (add to models.conf or download individually)
 bash scripts/lib/download-model.sh Qwen/Qwen3-72B                          # plan-72b
-bash scripts/lib/download-model.sh deepseek-ai/DeepSeek-R1-Distill-Qwen-32B # plan-reasoning
 ```
 
 ## Image Generation

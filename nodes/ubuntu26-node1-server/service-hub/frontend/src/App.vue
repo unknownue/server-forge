@@ -30,10 +30,14 @@ async function handleSwitch(name: string) {
   switching.value = true
   try {
     const res = await api.switchProfile(name)
-    showToast(
-      `Switched to ${res.new_profile} (${res.elapsed_seconds}s, stopped ${res.stopped_containers.length} containers)`,
-      'success'
-    )
+    if (res.status === 'success') {
+      showToast(
+        `Switched to ${res.new_profile} (${res.elapsed_seconds}s, started ${res.started_containers.length} containers)`,
+        'success'
+      )
+    } else {
+      showToast(`Switch ${res.status}: ${res.error ?? 'unknown error'}`, 'error')
+    }
     await refresh()
   } catch (e: any) {
     showToast(`Switch failed: ${e.message}`, 'error')
@@ -45,7 +49,11 @@ async function handleSwitch(name: string) {
 async function handleStop() {
   try {
     const res = await api.stopAll()
-    showToast(`Stopped ${res.stopped_containers.length} containers (${res.elapsed_seconds}s)`, 'success')
+    if (res.status === 'success') {
+      showToast(`Stopped ${res.stopped_containers.length} containers (${res.elapsed_seconds}s)`, 'success')
+    } else {
+      showToast(`Stop ${res.status}: ${res.error ?? 'unknown error'}`, 'error')
+    }
     await refresh()
   } catch (e: any) {
     showToast(`Stop failed: ${e.message}`, 'error')

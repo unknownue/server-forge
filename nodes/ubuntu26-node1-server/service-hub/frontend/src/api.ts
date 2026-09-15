@@ -104,7 +104,7 @@ export const api = {
   getProfile: (name: string) => get<ProfileDetail>(`/profiles/${name}`),
   getCurrent: () => get<CurrentProfile>('/current'),
   switchProfile: (name: string) => post<SwitchResult>(`/switch/${name}`),
-  stopAll: () => post<{ status: string; stopped_containers: string[]; elapsed_seconds: number }>('/stop'),
+  stopAll: () => post<{ status: string; stopped_containers: string[]; elapsed_seconds: number; error: string | null }>('/stop'),
   getHistory: () => get<{ history: HistoryEntry[] }>('/history'),
   getClaspStatus: (claspPort: number = 8080) => get<ClaspStatus>(`/clasp/status?clasp_port=${claspPort}`),
   startClasp: (vllmPort: number = 8000, claspPort: number = 8080) =>

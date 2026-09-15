@@ -23,7 +23,7 @@ from .models import (
     StopResult,
     SwitchResult,
 )
-from .profile_executor import load_profiles, load_state, stop_all, switch_profile
+from .profile_executor import load_profiles, load_state, stop_all, switch_profile, switch_in_progress
 
 logging.basicConfig(
     level=logging.INFO,
@@ -191,6 +191,11 @@ async def switch_to_profile(
         )
 
     logger.info("Switch request: → %s (force=%s)", name, force)
+    if switch_in_progress():
+        raise HTTPException(
+            status_code=409,
+            detail="Another switch or stop is already in progress — please retry after it completes.",
+        )
     result = await switch_profile(name, profiles, force=force)
 
     if result.status == "error":
@@ -205,7 +210,9 @@ async def stop_services():
     """Stop all managed containers across all profiles."""
     logger.info("Stop request received.")
     profiles = load_profiles()
-    stopped, elapsed = await stop_all(profiles)
+    stopped, elapsed, error = await stop_all(profiles)
+    if error:
+        return StopResult(status="error", stopped_containers=[], elapsed_seconds=elapsed, error=error)
     return StopResult(
         status="success",
         stopped_containers=stopped,

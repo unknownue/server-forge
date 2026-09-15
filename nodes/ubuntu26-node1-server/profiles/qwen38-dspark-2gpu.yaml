@@ -1,0 +1,47 @@
+# Qwen3.8-27B-NVFP4 (DSPARK speculative) — 2 GPUs, max context
+# 256K model len, ~227K+ verified usable context, ~475-628 tok/s. Costs GPUs 0+1.
+# Requires NCCL_P2P_DISABLE=1 (PCIe P2P init fails on this machine) — handled by
+# serve/sglang-qwen38-dspark.sh, which also caps CUDA-graph capture for TP=2.
+#
+# NOTE: mem-fraction-static 0.85 was marginal here — idle GPU0 headroom was only
+# 0.7-2.6 GiB (boot-dependent) and DSH-sized requests (42KB system prompt + tools
+# + 4096 max tokens) OOM'd rank 0 → 500 → "Connection error". 0.80 + the graph cap
+# keeps ~7 GiB/GPU headroom; verified stable with a 227K-token ladder and 3× the
+# DSH-shaped load. See bench/RESULTS.md sweep.
+#
+# Concurrent-agent context capacity (measured 2026-08-23, distinct prompts):
+#   - Per-agent context hard cap = 262,144 tokens (--context-length; NOT a VRAM
+#     limit — a single agent only uses ~260K of the KV pool).
+#   - KV pool is fp8 (329,735 tok) + bf16 (329,735 tok) DUAL pools ≈ 659K tokens
+#     shared by ALL agents (hybrid Mamba/SWA: only ~16/64 layers need full KV).
+#     So per-agent usable context ≈ min(262K, 659K / N).
+#   - Verified: 2×220K (521K total) OK · 6×100K (712K total) OK — pool headroom
+#     is ample for ≤6 agents; the 48-request concurrency cap is the real limit.
+#   - Real multi-agent cost is LATENCY, not capacity: large-context prefills are
+#     serialized (4×100K → later agents' TTFT 15s→45s; 6×100K → up to 116s).
+#     Decode concurrency capped at CUDA-graph max-bs 32.
+#   - See bench/RESULTS.md "Concurrent-agent context capacity".
+name: "qwen38-dspark-2gpu"
+description: "Qwen3.8-27B-NVFP4 DSPARK, 2 GPU TP=2, 256K model len (~227K+ usable, ~475-628 tok/s, 7 GiB/GPU headroom)"
+version: "1.0"
+
+gpu_allocation:
+  - gpu: [0, 1]
+    role: "text-inference"
+    model: "RadixArk/Qwen3.8-27B-NVFP4"
+    model_short: "Qwen3.8-27B-DSPARK"
+    port: 30000
+    tp: 2
+    container_name: "qwen-sglang-dspark-2gpu"
+    serve:
+      script: "serve/sglang-qwen38-dspark.sh"
+      args:
+        - "0,1"
+        - "30000"
+        - "2"
+        - "262144"
+        - "0.80"
+        - "8"
+
+stop_containers:
+  - "qwen-sglang-dspark-2gpu"

@@ -38,14 +38,15 @@ bash service-hub/stop.sh
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/gpus` | Query all GPU cards with real-time status |
-| `GET` | `/gpus/{id}` | Query a single GPU by ID |
-| `GET` | `/profiles` | List all available service profiles |
-| `GET` | `/profiles/{name}` | View profile details |
-| `GET` | `/current` | Current active profile |
-| `POST` | `/switch/{name}` | Switch to a profile (stops old, starts new) |
-| `POST` | `/stop` | Stop all managed containers |
-| `GET` | `/health` | Service Hub health check |
+| `GET` | `/api/gpus` | Query all GPU cards with real-time status |
+| `GET` | `/api/gpus/{id}` | Query a single GPU by ID |
+| `GET` | `/api/gpu-history` | GPU memory/utilization history |
+| `GET` | `/api/profiles` | List all available service profiles |
+| `GET` | `/api/profiles/{name}` | View profile details |
+| `GET` | `/api/current` | Current active profile |
+| `POST` | `/api/switch/{name}` | Switch to a profile (stops old, starts new) |
+| `POST` | `/api/stop` | Stop all managed containers |
+| `GET` | `/api/health` | Service Hub health check |
 
 Interactive API docs: http://localhost:9090/docs
 
@@ -59,29 +60,31 @@ Interactive API docs: http://localhost:9090/docs
 | `web-server-default` | 0,1,2,3 | 3×27B + 35B-A3B MoE |
 | `web-server-72b` | 0,1,2,3 | 72B TP=2 + 2×27B |
 | `web-server-reasoning` | 0,1,2,3 | R1-Distill-32B + MoE + 2×27B |
-| `dsv4-flash-default` | 0,1 | DeepSeek-V4-Flash 128K×3 |
-| `dsv4-flash-long` | 0,1 | DeepSeek-V4-Flash 256K×2 |
-| `dsv4-flash-524k` | 0,1 | DeepSeek-V4-Flash 524K×1 |
-| `dsv4-flash-high` | 0,1 | DeepSeek-V4-Flash 64K×5 |
+| `qwen38-dspark-1gpu` | 0 | Qwen3.8-27B-NVFP4 DSPARK, 131K ctx, balanced (4.9 GiB headroom) |
+| `qwen38-dspark-2gpu` | 0,1 | Qwen3.8-27B-NVFP4 DSPARK TP=2, 256K model len (~227K+ usable, ~7 GiB/GPU headroom) |
 | `unsloth` | 0,1,2,3 | Unsloth Studio (training) |
+| `anim-lab` | 0 | ComfyUI FLUX.2 image/video generation |
 
 ## Examples
 
 ```bash
 # Query GPU status
-curl http://localhost:9090/gpus
+curl http://localhost:9090/api/gpus
 
-# Switch to DeepSeek-V4-Flash
-curl -X POST http://localhost:9090/switch/dsv4-flash-default
+# Switch to the Qwen3.8 single-GPU profile
+curl -X POST http://localhost:9090/api/switch/qwen38-dspark-1gpu
+
+# Switch to the Qwen3.8 dual-GPU (full 256K ctx) profile
+curl -X POST http://localhost:9090/api/switch/qwen38-dspark-2gpu
 
 # Force switch (even if same profile)
-curl -X POST "http://localhost:9090/switch/game-server-default?force=true"
+curl -X POST "http://localhost:9090/api/switch/game-server-default?force=true"
 
 # Stop all services
-curl -X POST http://localhost:9090/stop
+curl -X POST http://localhost:9090/api/stop
 
 # Check current profile
-curl http://localhost:9090/current
+curl http://localhost:9090/api/current
 ```
 
 ## Architecture

@@ -1,0 +1,39 @@
+# Qwen3.8-27B-NVFP4 (DSPARK speculative) — 4 GPUs, max throughput
+# 262K model len (262,144-token ladder verified), ~579 tok/s (TP=4, +22% vs TP=2).
+# Costs all 4 GPUs. Requires NCCL_P2P_DISABLE=1 (PCIe P2P init fails on this
+# machine) — handled by serve/sglang-qwen38-dspark.sh, which also caps CUDA-graph
+# capture for TP>1.
+#
+# NOTE: --mem-fraction-static MUST be 0.80 or lower for TP=4:
+#   - frac 0.85 leaves only 2.3 GiB/GPU free → prefill CUDA graph auto-disabled
+#     (TTFT 411ms, 376 tok/s) and, worse, verify-graph capture stalls 20+ min at
+#     boot with max-bs 32.
+#   - frac 0.80 keeps 2.9 GiB/GPU headroom, full graph capture (~150s boot),
+#     578 tok/s, and 3× DSH-shaped load (42KB system + 28 tools + 4096 out) stable.
+#   - Headroom per GPU is ~2.9 GiB here vs ~7 GiB at TP=2: fixed per-GPU overhead
+#     (mamba state pool, graph pools, activations) doesn't shrink with TP.
+# See bench/RESULTS.md "TP=4 (4 GPUs)".
+name: "qwen38-dspark-4gpu"
+description: "Qwen3.8-27B-NVFP4 DSPARK, 4 GPU TP=4, 262K ctx, ~579 tok/s (2.9 GiB/GPU headroom)"
+version: "1.0"
+
+gpu_allocation:
+  - gpu: [0, 1, 2, 3]
+    role: "text-inference"
+    model: "RadixArk/Qwen3.8-27B-NVFP4"
+    model_short: "Qwen3.8-27B-DSPARK"
+    port: 30000
+    tp: 4
+    container_name: "qwen-sglang-dspark-4gpu"
+    serve:
+      script: "serve/sglang-qwen38-dspark.sh"
+      args:
+        - "0,1,2,3"
+        - "30000"
+        - "4"
+        - "262144"
+        - "0.80"
+        - "8"
+
+stop_containers:
+  - "qwen-sglang-dspark-4gpu"

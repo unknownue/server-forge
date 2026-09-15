@@ -1,0 +1,27 @@
+# Qwen3.8-27B-NVFP4 (DSPARK speculative) — 1 GPU, balanced
+# 131K usable context, ~337 tok/s, 4.9 GiB VRAM headroom. Recommended default.
+# See bench/RESULTS.md "Qwen3.8-27B-NVFP4 (DSPARK) Memory-Parameter Sweep".
+name: "qwen38-dspark-1gpu"
+description: "Qwen3.8-27B-NVFP4 DSPARK, 1 GPU, 131K ctx (balanced, 4.9 GiB headroom)"
+version: "1.0"
+
+gpu_allocation:
+  - gpu: [0]
+    role: "text-inference"
+    model: "RadixArk/Qwen3.8-27B-NVFP4"
+    model_short: "Qwen3.8-27B-DSPARK"
+    port: 30000
+    tp: 1
+    container_name: "qwen-sglang-dspark-1gpu"
+    serve:
+      script: "serve/sglang-qwen38-dspark.sh"
+      args:
+        - "0"
+        - "30000"
+        - "1"
+        - "131072"
+        - "0.85"
+        - "8"
+
+stop_containers:
+  - "qwen-sglang-dspark-1gpu"

@@ -22,3 +22,6 @@
 [submodule "submodules/cc-relay"]
 	path = submodules/cc-relay
 	url = https://github.com/omarluq/cc-relay.git
+[submodule "submodules/deepseek-v4.1-flash-4x-rtx-pro-6000"]
+	path = submodules/deepseek-v4.1-flash-4x-rtx-pro-6000
+	url = https://github.com/0xSero/deepseek-v4.1-flash-4x-rtx-pro-6000.git

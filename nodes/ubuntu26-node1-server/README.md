@@ -41,8 +41,11 @@ The IaC principle: **only configuration code is backed up; all data is rebuildab
 ## Driver Configuration
 
 - Compute GPUs: `nvidia-driver-595-server-open` (open kernel modules)
-- Display GPU: `nouveau` (in-kernel, loaded early via initramfs)
-- GRUB params: `nvidia-drm.modeset=1 nvidia-drm.fbdev=1 iommu=off`
+- Display GPU: GT 1030 (`52:00.0`) — **no native driver bound**: nvidia 595 dropped Pascal
+  (GP108) support and nouveau is blacklisted by the distro nvidia package, so the GT 1030
+  renders via `simple-framebuffer` (BIOS-provided framebuffer, `card0`/`fb0`). The console
+  display therefore depends entirely on the BIOS initializing the GT 1030's GOP at POST.
+- GRUB params (current): `iommu=off amd_iommu=off`
 
 ### IOMMU / NCCL Multi-GPU Fix
 
@@ -164,12 +167,11 @@ ubuntu26-node1-server/
 ├── images/              # Docker image build contexts
 │   ├── sglang/          #   SGLang patches (Anthropic API support)
 │   ├── anthropic-proxy/ #   Anthropic↔OpenAI translation proxy
-│   └── dsv4-vllm/       #   DeepSeek-V4-Flash vLLM (patched fork + MTP)
+│   └── sglang/          #   SGLang patches (Anthropic API support)
 │
 ├── profiles/            # GPU card allocation profiles (one YAML = one config)
 │   ├── game-server-*.yaml    #   Game Studio (3 text + image gen)
 │   ├── web-server-*.yaml     #   Web Studio (4 text)
-│   ├── dsv4-flash-*.yaml     #   DeepSeek-V4-Flash (2-GPU TP=2)
 │   ├── unsloth.yaml          #   Unsloth Studio (all GPUs, training)
 │   └── docs/                 #   Preserved documentation from old directories
 │
@@ -221,9 +223,6 @@ make service-hub
 ### Example: Switch Profile
 
 ```bash
-# Switch to DeepSeek-V4-Flash
-curl -X POST http://localhost:9090/switch/dsv4-flash-default
-
 # Switch to Game Studio
 curl -X POST http://localhost:9090/switch/game-server-default
 
@@ -235,5 +234,12 @@ curl http://localhost:9090/gpus | python3 -m json.tool
 
 | Date | Issue / Action | Resolution |
 |:---|:---|:---|
+| 2026-08-30 | nanochat 训练容器移除后, 命名卷 `nanochat-cache` 里的 checkpoint 对 host 不透明、不便管理, 且不符合 /data 分层约定 | 按 CLAUDE.md 新增的 "Training Checkpoints" 规则迁移: 训练产物 → `/data/work/checkpoints/nanochat/` (d24_4gpu step-5568 base checkpoint + 4 rank 优化器状态、d12_smoke、tokenizer、eval_bundle/评估结果、climbmax 分片), 可丢弃内核缓存 → `/data/cache/nanochat/` (triton/torchinductor)。逐文件 md5/大小/总字节数 (13,861,838,747 B) 校验一致后移除命名卷; nanochat 仓库 Dockerfile / `runs/docker_train.sh` 注释更新为 bind mount + `--user` + TRITON/TORCHINDUCTOR_CACHE_DIR 覆盖, 并补了 `/data/work/checkpoints/nanochat/.training_meta` 溯源文件。 |
+| 2026-08-28 | Boot issue: after normal `systemctl poweroff`, next power-on gives no display (board fans/LEDs run, monitor black); recovers only after full power drain (unplug AC + long-press power). Root cause: console display is provided solely by the GT 1030 (`52:00.0`, `simple-framebuffer`, no native driver), which depends entirely on BIOS GOP init; the 4× RTX 6000D Blackwell cards have a known warm-reboot (S5) re-init issue, so on warm boot the BIOS fails to bring up the display GPU. Matches known NVIDIA Blackwell issue (display only after PSU power cycle). | Under investigation. Recommended: (1) BIOS → set Initial Display Output / Primary Display = GT 1030 slot (not Auto); (2) disable Fast Boot; (3) enable ErP (S4+S5) so shutdown cuts standby power; (4) update Gigabyte W790 AI TOP BIOS beyond F9a and check NVIDIA VBIOS/driver update for RTX 6000D. Refs: NVIDIA forum threads 370968, 343984, 338585. |
+| 2026-08-22 | Qwen3.8-27B-NVFP4 (DSPARK) 4-GPU (TP=4) deployment benchmark: 579 tok/s (vs 475 TP=2, 337 TP=1), 262K verified context, unlocks 524K with `SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1`. Found TP=4 requires `--mem-fraction-static 0.80`: at 0.85 the prefill CUDA graph is auto-disabled (headroom 2.3 GiB < 4 GiB gate → 376 tok/s, 411 ms TTFT) and verify-graph capture **stalls ~20 min** at boot with max-bs 32; at 0.80 (2.9 GiB/GPU headroom, full graph capture, ~150 s boot) 3× DSH-shaped load is stable. CustomAllreduce auto-disabled on 4 PCIe-only GPUs caps scaling at ~1.22× | Added hub profile `qwen38-dspark-4gpu` (TP=4, 262K, 0.80/8, ~579 tok/s) and documented the TP=4 matrix in `bench/RESULTS.md`. `serve/sglang-qwen38-dspark.sh` now auto-adds `SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1` when ctx > 262144. |
+| 2026-08-20 | Service Hub `qwen38-dspark-2gpu` (f0.85) intermittent: DSH messages → 500 → "Connection error"; idle GPU0 headroom only 0.7–2.6 GiB (boot-dependent), DSH-sized request OOM'd rank 0 (`torch.OutOfMemoryError` in scheduler: 16 MiB alloc, 11 MiB free) | Lowered to `--mem-fraction-static 0.80` + `--cuda-graph-max-bs 32` (TP=2) → ~7 GiB/GPU headroom; verified 227K-token ladder + 3× DSH-shaped load. Also mounted persistent kernel cache `/data/cache/sglang_qwen38` (SGLANG/TRITON/flashinfer), cutting switch boot time from ~147s to ~90–110s so the "Connection error during boot window" failure mode shrinks too. |
+| 2026-08-20 | DeepSeek Harness + local SGLang Qwen3.8: `<think>` reasoning rendered as plain text, and the reply stopped right after a `<tool_call>` instead of executing the tool | Root cause: SGLang was launched without `--reasoning-parser`/`--tool-call-parser`, so it streamed `<think>…</think>` and `<tool_call>…</tool_call>` as raw text in `content` (`reasoning_content` stayed `null`, finish_reason stayed `stop`). Fixed `serve/sglang-qwen38-dspark.sh` to add `--reasoning-parser qwen3` + `--tool-call-parser qwen3_coder`; requires a container restart to take effect. |
+| 2026-08-19 | Service Hub: clicking switch twice (or after a Stop) raced — the second request's stop phase killed the first's in-flight container boot, and the hub recorded "success" for a profile that never came up | Added a switch/stop serialization lock (concurrent requests get 409/"already in progress"), serve-script failures now return status error/partial with the script's stderr, history records "failed", and the frontend toasts reflect the real status. Serve script errors now go to stderr. |
+| 2026-08-19 | Qwen3.8-27B-NVFP4 (DSPARK) served with `--context-length 262144 --mem-fraction-static 0.95 --mamba-full-memory-ratio 11.93` (TP=1): every DeepSeek Harness message returned "Connection error" | Root cause: idle VRAM 84414/85651 MiB (1.2 GiB free); DSH-sized requests OOM the scheduler → 500 → server dies → DSH retries hit the dead port. Full sweep in `bench/RESULTS.md`. Now managed by Service Hub via `qwen38-dspark-1gpu` (131K ctx, 0.85/8, ~337 tok/s, 4.9 GiB headroom, GPU 0) and `qwen38-dspark-2gpu` (~227K+ ctx, 0.80/8, ~475 tok/s, GPU 0+1, NCCL_P2P_DISABLE=1). Ad-hoc container removed. |
 | 2026-05-24 | SGLang/vLLM TP=2 hang on RTX 6000 Blackwell (GPU 100%, NCCL deadlock) | Root cause: IOMMU DMA remapping. Fix: `iommu=off` + `uvm_disable_hmm=1`. |
 | | Initial setup | |

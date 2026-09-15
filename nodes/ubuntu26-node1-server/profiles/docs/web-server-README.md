@@ -85,12 +85,12 @@ GPU 2:   Qwen3.6-27B FP8 TP=1 → :8001
 GPU 3:   Qwen3.6-27B FP8 TP=1 → :8002
 ```
 
-### Plan Reasoning — Deep CoT + MoE
+### Plan Reasoning — Quad 27B + MoE
 
-Download `deepseek-ai/DeepSeek-R1-Distill-Qwen-32B` first.
+Uses four Qwen instances for deep reasoning + code generation.
 
 ```
-GPU 0: R1-Distill-32B  FP8 TP=1 → :8000
+GPU 0: Qwen3.6-27B     FP8 TP=1 → :8000
 GPU 1: Qwen3.6-35B-A3B FP8 TP=1 → :8001 (MoE)
 GPU 2: Qwen3.6-27B     FP8 TP=1 → :8002
 GPU 3: Qwen3.6-27B     FP8 TP=1 → :8003
@@ -108,7 +108,6 @@ at typical prompt lengths (not max context-length).
 | Qwen3.6-27B | 26 GB | 57.6 GB | 256 KB | 58 | 29 |
 | Qwen3.6-35B-A3B | 35 GB (FP8) | 48.6 GB | 256 KB | 97 | 48 |
 | Qwen3-72B | 72 GB (TP2) | 47.6 GB/each | 512 KB | 76 | 38 |
-| R1-Distill-32B | 31 GB | 52.6 GB | 256 KB | 106 | 53 |
 
 ### Default Plan Concurrency
 

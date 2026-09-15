@@ -14,10 +14,27 @@ PORT="${2:-8188}"
 MODELS_BASE="/data/work/models"
 COMFYUI_HOME="/data/cache/comfyui"
 FLUX_SRC="${MODELS_BASE}/Comfy-Org/flux2-dev/split_files"
+COMFYUI_MODELS="${MODELS_BASE}/comfyui"
 
 COMFYUI_IMAGE="yanwk/comfyui-boot:cu128-slim"
 _DEFAULT_NAME="comfyui-${PORT}"
 CONTAINER_NAME="${SERVICE_HUB_CONTAINER_NAME:-$_DEFAULT_NAME}"
+
+# ── animlab 扩展路径（可选） ──
+# 自动检测同级 animlab 项目，或通过环境变量指定
+ANIMLAB_PROJECT="${ANIMLAB_PROJECT:-}"
+if [[ -z "$ANIMLAB_PROJECT" ]]; then
+    # 尝试在常见位置查找
+    for candidate in \
+        "$SCRIPT_DIR/../../../../Development/animlab" \
+        "$HOME/Development/animlab" \
+        "$HOME/animlab"; do
+        if [[ -d "$candidate/src/animlab" && -d "$candidate/submodules/ComfyUI/custom_nodes/animlab_extension" ]]; then
+            ANIMLAB_PROJECT="$candidate"
+            break
+        fi
+    done
+fi
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
@@ -53,6 +70,24 @@ setup_models() {
 
     log "  Models linked."
 
+    # ── Link custom ComfyUI models (Anima, etc.) ──
+    local custom_dir="$COMFYUI_MODELS"
+    if [[ -d "$custom_dir" ]]; then
+        for model_dir in "$custom_dir"/*/; do
+            [[ -d "$model_dir/split_files" ]] || continue
+            local model_name="$(basename "$model_dir")"
+            log "  Linking custom model: $model_name"
+
+            for subdir in diffusion_models text_encoders vae loras; do
+                local src_subdir="$model_dir/split_files/$subdir"
+                [[ -d "$src_subdir" ]] || continue
+                for f in "$src_subdir"/*.safetensors; do
+                    [[ -f "$f" ]] && ln -sf "$f" "$models_dir/$subdir/" 2>/dev/null || true
+                done
+            done
+        done
+    fi
+
     # Download official FLUX.2 workflows if not present
     if [[ ! -f "$workflows_dir/image_flux2_fp8.json" ]]; then
         log "  Downloading FP8 workflow..."
@@ -84,6 +119,32 @@ fi
 
 setup_models
 
+# ── animlab 扩展 volume mounts（可选） ──
+ANIMLAB_MOUNTS=()
+ANIMLAB_ENVS=()
+if [[ -n "$ANIMLAB_PROJECT" && -d "$ANIMLAB_PROJECT/submodules/ComfyUI/custom_nodes/animlab_extension" ]]; then
+    log "animlab extension found at: ${ANIMLAB_PROJECT}"
+    ANIMLAB_EXT_DIR="${ANIMLAB_PROJECT}/submodules/ComfyUI/custom_nodes/animlab_extension"
+    ANIMLAB_SRC_DIR="${ANIMLAB_PROJECT}/src"
+    ANIMLAB_DATA_DIR="${ANIMLAB_PROJECT}/workspace/data"
+
+    # 确保数据目录存在（SQLite DB + 输出文件）
+    mkdir -p "${ANIMLAB_DATA_DIR}/outputs"
+
+    ANIMLAB_MOUNTS=(
+        -v "${ANIMLAB_EXT_DIR}:/root/ComfyUI/custom_nodes/animlab_extension:ro"
+        -v "${ANIMLAB_SRC_DIR}:/animlab/src:ro"
+        -v "${ANIMLAB_DATA_DIR}:/animlab/data"
+    )
+    ANIMLAB_ENVS=(
+        -e "ANIMLAB_SRC=/animlab/src"
+        -e "ANIMLAB_DATA=/animlab/data"
+    )
+    log "  Mounts: extension(src) + src(ro) + data(rw)"
+else
+    log "animlab extension not found, skipping"
+fi
+
 # ── Set ACLs: container runs as root, files must be accessible to host user ──
 HOST_USER="$(id -un)"
 setfacl -R -m "u:$HOST_USER:rwx" "$COMFYUI_HOME" 2>/dev/null || true
@@ -99,7 +160,11 @@ docker run --rm -d \
     -p "$PORT:8188" \
     -v "$COMFYUI_HOME:/root/ComfyUI" \
     -v "$FLUX_SRC:/data/work/models/Comfy-Org/flux2-dev/split_files:ro" \
+    -v "$COMFYUI_MODELS:/root/ComfyUI/models/custom" \
+    "${ANIMLAB_MOUNTS[@]+"${ANIMLAB_MOUNTS[@]}"}" \
+    "${ANIMLAB_ENVS[@]+"${ANIMLAB_ENVS[@]}"}" \
     "$COMFYUI_IMAGE" \
+    --highvram --listen 0.0.0.0 --port "$PORT" \
     > /dev/null 2>&1
 
 log "ComfyUI started. Waiting for health check..."

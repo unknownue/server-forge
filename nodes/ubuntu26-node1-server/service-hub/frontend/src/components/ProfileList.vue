@@ -42,7 +42,6 @@ async function toggleExpand(name: string) {
 function category(name: string) {
   if (name.startsWith('game-')) return 'Game Studio'
   if (name.startsWith('web-')) return 'Web Studio'
-  if (name.startsWith('dsv4-')) return 'DeepSeek-V4'
   if (name === 'unsloth') return 'Training'
   return 'Other'
 }

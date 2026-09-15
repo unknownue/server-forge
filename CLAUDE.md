@@ -104,6 +104,51 @@ to prevent stale file accumulation.
 Models are never committed to the repository but are reproducible via
 `bash scripts/lib/download-model.sh [MODEL_ID] [REV] [FORMAT]`.
 
+## Training Checkpoints
+
+Self-trained models and their training artifacts are **not** ephemeral
+(reproducing them costs GPU-weeks), so they are kept as work products, with
+the same split as inference data: artifacts under `/data/work/`, disposable
+caches under `/data/cache/`.
+
+| Content | Location | Notes |
+|---------|----------|-------|
+| Checkpoints (model weights, optimizer states, meta) | `/data/work/checkpoints/<project>/` | e.g. `nanochat/base_checkpoints/d24_4gpu/` |
+| Trained tokenizer, eval results/bundles, pretraining data shards | same project dir | follows the framework's own base-dir layout (`tokenizer/`, `base_eval/`, `base_data_climbmix/`, ...) |
+| Triton / TorchInductor kernel caches | `/data/cache/<project>/` | drop and rebuild freely |
+
+Rules:
+
+1. **Bind mounts, not named volumes** — mount the host directory into the
+   container so data stays visible to host tools (`ls`, `du`, `rsync`,
+   `fix-data-permissions.sh`). Named volumes are opaque and silently
+   outlive their containers.
+2. **Point kernel caches away from the checkpoint dir** — override the
+   framework's cache env vars at `docker run` time (e.g.
+   `TRITON_CACHE_DIR`, `TORCHINDUCTOR_CACHE_DIR`) so the `/data/work`
+   tree only contains artifacts.
+3. **Run containers as the host user** (`--user $(id -u):$(id -g)`,
+   Pattern 1) so files are host-owned directly; both locations are also
+   covered by `scripts/fix-data-permissions.sh` as a fallback.
+4. **Record provenance** — keep a short `.training_meta` (or `MANIFEST.md`)
+   per project: repo + commit, run hyperparameters, GPU count, date,
+   final step / validation metric, next pipeline stage.
+
+Example (nanochat GPT-2 training, see `runs/docker_train.sh`). Mount the
+host paths at the **same in-container path** — the training script
+auto-detects `/data/work/checkpoints/nanochat` and uses it as the base dir:
+
+```bash
+docker run ... \
+  --user "$(id -u):$(id -g)" -e HOME="$HOME" \
+  -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro \
+  -v /data/work/checkpoints/nanochat:/data/work/checkpoints/nanochat \
+  -v /data/cache/nanochat:/data/cache/nanochat \
+  -e TRITON_CACHE_DIR=/data/cache/nanochat/triton \
+  -e TORCHINDUCTOR_CACHE_DIR=/data/cache/nanochat/torchinductor \
+  nanochat:train
+```
+
 ## Docker Container File Ownership
 
 When Docker containers write to host-mounted directories (`-v /host/path:/container/path`),

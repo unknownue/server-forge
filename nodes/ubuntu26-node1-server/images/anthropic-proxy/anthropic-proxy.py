@@ -44,7 +44,6 @@ BACKENDS = {
     "Qwen3.6-27B-FP8":       os.getenv("BACKEND_8000", "http://localhost:8000/v1"),
     "Qwen3.6-35B-A3B-FP8":   os.getenv("BACKEND_8001", "http://localhost:8001/v1"),
     "Qwen3-72B-FP8":          os.getenv("BACKEND_8000", "http://localhost:8000/v1"),
-    "DeepSeek-R1-Distill-Qwen-32B-FP8": os.getenv("BACKEND_8000", "http://localhost:8000/v1"),
     # Anthropic aliases (fallback — for compatibility)
     "claude-opus-4-7":        os.getenv("BACKEND_8000", "http://localhost:8000/v1"),
     "claude-sonnet-4-6":      os.getenv("BACKEND_8001", "http://localhost:8001/v1"),

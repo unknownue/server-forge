@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Service Hub
+Name[zh_CN]=服务面板
+Comment=Open the GPU / service dashboard for ubuntu-server-node-2
+Comment[zh_CN]=打开本机 GPU 与服务管理面板
+# Terminal=false: the launcher script detaches the browser and exits, so no
+# terminal window should linger.
+Exec=/home/unknownue/Desktop/service-hub.sh
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;
+StartupNotify=true
+# The hub takes a few seconds to answer after a cold start; give the launcher
+# time to wait for it before the shell considers it unresponsive.
+X-GNOME-Autostart-enabled=false

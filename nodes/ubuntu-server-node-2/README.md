@@ -458,6 +458,7 @@ ubuntu-server-node-2/
 ├── service-hub/         # Web UI: GPU status + one-click profile switching
 │   ├── deploy.sh, stop.sh         # foreground run / stop
 │   ├── install-service.sh         # systemd --user unit (recommended)
+│   ├── install-desktop.sh         # desktop icon for the GNOME session
 │   ├── systemd/service-hub.service
 │   ├── src/service_hub/           # FastAPI backend (sysfs GPU monitor)
 │   └── frontend/                  # Vue 3 + Vite, builds into static/
@@ -486,6 +487,7 @@ ROCm images.
 
 | Date | Issue / Action | Resolution |
 |:---|:---|:---|
+| 2026-09-19 | Added a desktop launcher for the Service Hub | Installed `~/Desktop/service-hub.desktop` + `.sh` via `install-desktop.sh`. Two deliberate choices: it does **not** start a second hub (the systemd user service with lingering is normally already serving, so a bare `deploy.sh` would collide on :9090) — it health-checks first and only opens the browser; and the thing to double-click is a `.desktop` file, because this GNOME session has no handler for `text/x-shellscript` and would otherwise open a text editor. Verified the stopped -> launcher -> running -> browser cycle. |
 | 2026-09-19 | Window was set 64K below the model's real limit | `max_position_embeddings` is 262,144 (256K, no rope_scaling), but `--context-length` was 196,608 — a self-imposed cap wasting a quarter of the model's capacity. Raised to **262,144** and verified with real prompts (199,858 / 239,854 / 259,852 tokens all served, zero OOM); over-length input is rejected cleanly with HTTP 400. Corrected an earlier claim in this repo that the KV pool was a surplus to redistribute — it is the scarce resource (short of 2x256K by 239,872), and the window was the actual waste. Note no window lets 2 requests each use it fully: 256K maximises a single request, 192K balances two. See `bench/results/context-256k.txt`. |
 | 2026-09-19 | Retuned for concurrency 2 and maximum usable memory | `--mem-fraction-static` 0.90 -> **0.96**, `--max-running-requests` 4 -> **2**, context window left at 196,608. KV pool grew 232,392 -> **284,777 tokens** (+22%); c=2 throughput 41.0 -> 50.8 tok/s. Verified with two concurrent 130k prompts (impossible under the old pool), a 140k single request, and a worst-case 2x140k + 600-token MTP stress run with zero OOM. Note c=2 shares one pool, so 2 x 196k (393,216) still does not fit — the gain is two *medium* long requests. See `bench/results/context-concurrency-tuning.txt`. |
 | 2026-09-19 | Documented the live serving limits (context + concurrency) | Context 196,608 per request (verified end-to-end at 196,060 prompt tokens), KV pool 232,392 tokens in bf16. Concurrency is capped at **4 simultaneously decoded** requests, but that queues rather than rejects: an 8-way burst returned 8/8 in two waves at 175.4 tok/s aggregate. Headroom is only 3.93 GB, and `--max-running-requests` is what consumes it. See `bench/results/serving-limits.txt`. |

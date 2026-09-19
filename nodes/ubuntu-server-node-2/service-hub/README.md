@@ -70,6 +70,31 @@ One consequence, worth knowing if you edit the unit: `docker.service` is a
 Ordering is instead handled inside `deploy.sh`, which waits (up to 30 s) for
 `docker info` to succeed before starting.
 
+### Desktop launcher
+
+```bash
+bash nodes/ubuntu-server-node-2/service-hub/install-desktop.sh
+```
+
+Puts two files on the desktop: a `service-hub.desktop` entry (what you
+double-click) and the `service-hub.sh` it runs. Remove with `--remove`.
+
+Two things this handles that a plain "start the server" script would not:
+
+- **It does not start a second instance.** The hub normally already runs as the
+  systemd user service, and lingering keeps it up across logins, so the script
+  checks the health endpoint first and only opens the browser if it is already
+  serving. Starting `deploy.sh` directly would collide with the service on
+  port 9090.
+- **The `.desktop` file is the thing to double-click.** On this GNOME desktop
+  there is no default handler registered for `text/x-shellscript`, so
+  double-clicking a bare `.sh` tends to open a text editor rather than run it.
+  The desktop file is also marked trusted, which GNOME requires before it will
+  launch anything.
+
+The installed script has this checkout's path baked in, so re-run the installer
+if the repository moves.
+
 ## Stop
 
 ```bash

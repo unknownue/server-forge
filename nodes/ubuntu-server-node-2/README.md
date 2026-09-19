@@ -455,7 +455,9 @@ ubuntu-server-node-2/
 │   ├── sglang-tp2.sh              # SGLang TP=2/DP launcher
 │   └── patch-mtp-quant-config.sh  # Required model patch before SGLang load
 ├── service-hub/         # Web UI: GPU status + one-click profile switching
-│   ├── deploy.sh, stop.sh
+│   ├── deploy.sh, stop.sh         # foreground run / stop
+│   ├── install-service.sh         # systemd --user unit (recommended)
+│   ├── systemd/service-hub.service
 │   ├── src/service_hub/           # FastAPI backend (sysfs GPU monitor)
 │   └── frontend/                  # Vue 3 + Vite, builds into static/
 └── bench/               # Performance tests / platform probes
@@ -468,10 +470,13 @@ ubuntu-server-node-2/
 ### Quick start after a reboot
 
 ```bash
-bash nodes/ubuntu-server-node-2/service-hub/deploy.sh   # then open :9090
+bash nodes/ubuntu-server-node-2/service-hub/install-service.sh   # then open :9090
 ```
 
-The UI shows both GPUs live and starts a serving profile in one click. Note that
+Runs as a `systemd --user` service (auto-restart on failure). To keep it up with
+no login session, run once: `sudo loginctl enable-linger $USER` — without it the
+user manager stops at logout. The UI shows both GPUs live and starts a serving
+profile in one click. Note that
 ROCm containers take `--device=/dev/kfd --device=/dev/dri` with the host
 render/video **GIDs** via `--group-add` — the group *names* do not exist inside
 ROCm images.
@@ -480,6 +485,7 @@ ROCm images.
 
 | Date | Issue / Action | Resolution |
 |:---|:---|:---|
+| 2026-09-19 | Service Hub died with the shell/session | Added a `systemd --user` unit (`service-hub.service`) plus `install-service.sh` to install/enable it reproducibly. `Restart=on-failure` verified by killing the process (came back on a new PID). Note: a user unit **cannot** depend on `docker.service` — that is a *system* unit invisible to the user manager, and `After=`/`Requires=` fails with "Unit docker.service not found"; `deploy.sh` waits for `docker info` instead. Lingering is off by default, so `sudo loginctl enable-linger $USER` is required for the hub to survive logout; the installer reports this rather than assuming it. |
 | 2026-09-19 | Added a web UI to start services without remembering commands | Built `service-hub/` (FastAPI + Vue 3), modeled on node1's. Two AMD-specific changes: GPU status is read from **sysfs** because no ROCm CLI exists on the host, and **P2P health is surfaced in the UI** because losing the patched kernel or RCCL degrades TP=2 silently rather than erroring. Added `profiles/` with `sglang-tp2`, `sglang-dp2` and `sglang-single`; verified the full cycle (stop → switch → healthy → inference) through the API. |
 | 2026-09-19 | `serve/sglang-tp2.sh` silently exited without starting anything | Two bugs, both masked by `set -e`: (1) `stop_existing` piped to `grep -q`, and a no-match returned non-zero, aborting the script before launch; (2) the container was started with no command and the server was injected via `docker exec -d`, but the container had already exited. Fixed by collecting container ids without a failing pipe, and by making the server the container's main process. |
 | 2026-09-19 | Non-root Docker workflow settled; registry mirrors left unconfigured | Kept the **root dockerd** (rootless would not see the ~125 GB in `/data/docker`, incl. the locally-built SGLang image, and would force a save/load migration). The `docker` group already allows unprivileged container use; documented that group membership is root-equivalent. `config/set-docker-registry.sh` rewritten to configure multiple mirrors with a reachability check — the one remaining `sudo` step, and optional since builds can name the mirror per-pull. |

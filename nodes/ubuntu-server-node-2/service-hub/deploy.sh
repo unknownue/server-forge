@@ -28,6 +28,30 @@ log "  Service Hub — ubuntu-server-node-2"
 log "  Port: $PORT"
 log "============================================"
 
+# ── Wait for Docker ──
+# The systemd user unit cannot declare `After=docker.service`, because that is a
+# *system* unit and is invisible to the user manager (`Requires=` on it fails
+# with "Unit docker.service not found"). Waiting here covers the boot race
+# instead: without it, a hub started before dockerd would show every profile as
+# stopped and refuse switches with confusing errors.
+if command -v docker >/dev/null 2>&1; then
+    for i in $(seq 1 30); do
+        if docker info >/dev/null 2>&1; then
+            log "Docker is ready."
+            break
+        fi
+        if [[ $i -eq 30 ]]; then
+            log "WARNING: Docker not responding after 30s — the UI will start,"
+            log "         but profiles cannot be started until it is up."
+        else
+            [[ $i -eq 1 ]] && log "Waiting for Docker…"
+            sleep 2
+        fi
+    done
+else
+    log "WARNING: docker not found on PATH — profile switching will not work."
+fi
+
 # ── Python dependencies into the local tree (idempotent) ──
 if [[ ! -d "$PYLIBS/fastapi" ]]; then
     log "Installing Python dependencies into $PYLIBS (first run)…"

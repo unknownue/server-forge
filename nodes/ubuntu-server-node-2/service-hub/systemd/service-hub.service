@@ -1,0 +1,30 @@
+[Unit]
+Description=Service Hub — web UI for starting/stopping serve profiles (ubuntu-server-node-2)
+Documentation=file:%h/Workspace/server-forge/nodes/ubuntu-server-node-2/service-hub/README.md
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Workspace/server-forge/nodes/ubuntu-server-node-2/service-hub
+# deploy.sh resolves its own paths, installs deps on first run, and execs
+# uvicorn in the foreground — exactly what Type=simple expects.
+ExecStart=/bin/bash %h/Workspace/server-forge/nodes/ubuntu-server-node-2/service-hub/deploy.sh 9090
+
+Restart=on-failure
+RestartSec=5
+# Serving profiles are long-lived; do not let a stuck subprocess block restart.
+TimeoutStopSec=30
+KillMode=mixed
+
+# The hub itself is unprivileged: it only shells out to docker (permitted by the
+# user's `docker` group membership) and reads sysfs.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
+
+# NOTE on ordering: docker.service is a SYSTEM unit and is not visible to the
+# user manager, so `After=`/`Requires=` on it fails with "Unit docker.service not
+# found". Ordering is therefore not declared here; instead deploy.sh checks
+# `docker info` at startup, and the API reports per-profile container state,
+# which is accurate whether or not the daemon was up when the hub started.

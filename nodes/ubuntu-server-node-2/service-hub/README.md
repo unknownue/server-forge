@@ -20,7 +20,7 @@ this AMD node forced:
 ## Start
 
 ```bash
-bash nodes/ubuntu-server-node-2/service-hub/deploy.sh        # port 9090
+bash nodes/ubuntu-server-node-2/service-hub/deploy.sh        # foreground, port 9090
 bash nodes/ubuntu-server-node-2/service-hub/deploy.sh 8080   # custom port
 ```
 
@@ -28,10 +28,53 @@ Then open <http://localhost:9090/>. First run installs Python deps into the
 repo's `.pylibs` tree (there is no `uv`, and `bootstrap.pypa.io` is unreachable
 from this network) and builds the frontend if `static/` is missing.
 
+### Run as a service (recommended)
+
+```bash
+bash nodes/ubuntu-server-node-2/service-hub/install-service.sh
+```
+
+Installs a **systemd user** unit, enables it, and starts it. Manage it with:
+
+```bash
+systemctl --user status  service-hub
+systemctl --user restart service-hub
+systemctl --user stop    service-hub
+journalctl --user -u service-hub -f
+```
+
+To uninstall: `bash .../install-service.sh --remove`.
+
+`Restart=on-failure` is set, so a crashed hub comes back automatically.
+
+**One sudo step is needed to survive logout.** `enable` only starts the unit at
+login; without lingering, the whole user manager stops when your last session
+ends:
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+`install-service.sh` prints this if lingering is off, and says nothing once it is
+on. For a machine that serves models unattended, turning it on is the point.
+
+#### Why it is a *user* unit
+
+The hub needs no privileges — it shells out to `docker` (permitted by the user's
+`docker` group membership) and reads sysfs. A user unit also gets `%h` expansion
+and the user's environment for free.
+
+One consequence, worth knowing if you edit the unit: `docker.service` is a
+**system** unit and is invisible to the user manager, so declaring
+`After=docker.service` fails outright with `Unit docker.service not found`.
+Ordering is instead handled inside `deploy.sh`, which waits (up to 30 s) for
+`docker info` to succeed before starting.
+
 ## Stop
 
 ```bash
 bash nodes/ubuntu-server-node-2/service-hub/stop.sh
+# or, when installed as a service: systemctl --user stop service-hub
 ```
 
 This stops only the hub. Containers it launched keep running — use the UI's

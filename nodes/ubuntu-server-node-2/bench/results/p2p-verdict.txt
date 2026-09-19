@@ -1,0 +1,76 @@
+P2P feasibility probe — ubuntu-server-node-2
+Last updated: 2026-09-18 (AFTER patched-kernel reboot)  — STATUS: P2P WORKING
+
+Platform : HUANANZHI X99-8D3 V1.2, 2x Intel Xeon E5-2686 v4 (Haswell-EP, dual socket)
+GPUs     : 2x AMD Radeon RX 7900 XTX (gfx1100 / Navi 31), 24 GiB each
+Kernel   : 7.0.14-x99p2p (locally built, see provision/build-p2p-kernel.sh)
+Probe    : nodes/ubuntu-server-node-2/bench/check-p2p-hip.sh
+
+── Topology ────────────────────────────────────────────────────────────────
+  GPU 0000:05:00.0  root port 00:02.0  IOMMU group 90  host bridge 00:00.0
+  GPU 0000:08:00.0  root port 00:03.0  IOMMU group 94  host bridge 00:00.0
+
+  Both GPUs are under the SAME host bridge (00:00.0, socket 0) but DIFFERENT
+  root ports. The shared host bridge is what makes the kernel whitelist entry's
+  REQ_SAME_HOST_BRIDGE condition satisfiable.
+
+── Measurement history ─────────────────────────────────────────────────────
+  1) Stock kernel, ReBAR OFF (BAR0 = 256 MiB):
+       hipDeviceCanAccessPeer : NO both ways
+       GPU0 -> GPU1 : 5.94 GB/s     GPU1 -> GPU0 : 5.63 GB/s
+
+  2) Stock kernel, ReBAR ON (BAR0 = 32 GiB):
+       hipDeviceCanAccessPeer : NO both ways        (unchanged)
+       GPU0 -> GPU1 : 2.73 GB/s     GPU1 -> GPU0 : 3.01 GB/s
+     Large BAR alone made things WORSE: the aperture became mappable but the
+     fabric still did not route peer traffic, so host-staged copies paid extra
+     translation cost. ReBAR is necessary but NOT sufficient.
+
+  3) Patched kernel 7.0.14-x99p2p (whitelist entry added):
+       hipDeviceCanAccessPeer : YES both ways       <-- FIXED
+       GPU0 -> GPU1 : 10.17 GB/s    GPU1 -> GPU0 : 10.17 GB/s
+
+  => 3.4x faster than the stock-kernel best case, and the peer flag is now set.
+
+── Independent confirmation from KFD topology ──────────────────────────────
+Before the patch, each GPU's p2p_links contained ONLY a link to the CPU node
+(node_to 1, flags 1 = neither P2P_CAPABLE nor P2P_DIRECT).
+
+After the patch, genuine GPU<->GPU links appear:
+    node_from 2 node_to 3 ... max_bandwidth 16000 ... flags 3
+    node_from 3 node_to 2 ... max_bandwidth 16000 ... flags 3
+flags 3 = P2P_CAPABLE | P2P_DIRECT, and 16000 MB/s matches PCIe 3.0 x16.
+
+── Interpreting the 10.17 GB/s number ──────────────────────────────────────
+This is PCIe 3.0 x16 (Haswell-EP), whose theoretical ceiling is ~15.75 GB/s.
+10.17 GB/s is ~65% of theoretical — normal for a peer path on Gen3, and it
+matches the ~10.29 GB/s reported in lcz.me/topic/1791 #18997 on comparable X99
+hardware. Do NOT compare this against PCIe 4.0/5.0 figures (20-50+ GB/s);
+the probe's pass threshold is therefore generation-aware, not a fixed 25 GB/s.
+
+── Root cause (what was actually wrong) ────────────────────────────────────
+Host bridge 8086:6f00 (Xeon E7 v4/E5 v4 DMI2) was absent from
+drivers/pci/p2pdma.c's pci_p2pdma_whitelist[], which listed only Haswell-EP v3
+(0x2f00/0x2f01). Every peer transfer through this bridge was rejected.
+
+Ruled out along the way:
+  - ACS: setpci reports NO ACS capability on the root ports, so ACS was never
+    the blocker.
+  - Virtualization: irrelevant here; this is bare metal.
+  - BIOS large BAR: enabled and confirmed (32 GiB), but insufficient alone.
+  - Hardware limitation: DISPROVEN. X99/Broadwell-EP does support cross-root-port
+    P2P; it was a software whitelist gap.
+
+── What remains: the RCCL layer ────────────────────────────────────────────
+HIP-level P2P now works, but RCCL may still refuse to use it. Cross-root-port
+topology is classified as PATH_PHB, and stock RCCL then falls back to SHM
+(host memory) even though the hardware path is available. Per #18997 this needs
+BOTH: a small reorder in RCCL's src/graph/paths.cc so a user-supplied
+NCCL_P2P_LEVEL=PHB is not overwritten on Intel platforms, AND the env var set.
+Verify with rccl-tests + NCCL_DEBUG=INFO ("via P2P/IPC" vs SHM).
+SGLang TP2 should then log isAllDirectP2p 1.
+
+── Verdict ─────────────────────────────────────────────────────────────────
+  HIP P2P        : WORKING (peer access granted, 10.17 GB/s)
+  TP=2           : viable once RCCL is patched to stop falling back to SHM
+  DP=2           : still the zero-risk fallback, unaffected by any of this

@@ -1,0 +1,16 @@
+--- a/python/sglang/kernels/aot/csrc/common_extension_rocm.cc
++++ b/python/sglang/kernels/aot/csrc/common_extension_rocm.cc
+@@ -313,8 +313,12 @@
+                                   int64_t output_topk);
+ 
+   m.def(
++      // NOTE: no default on use_v2_format. With a default, torch's Python
++      // binding exposes only 7 positional parameters, while the engine calls
++      // gptq_gemm with 8 positional arguments (gptq_kernels.py), which then
++      // fails with "takes 7 positional arguments but 8 were given".
+       "gptq_gemm(Tensor a, Tensor b_q_weight, Tensor b_gptq_qzeros, Tensor b_gptq_scales, Tensor b_g_idx, bool "
+-      "use_shuffle, int bit, bool use_v2_format=False) -> Tensor");
++      "use_shuffle, int bit, bool use_v2_format) -> Tensor");
+   m.impl("gptq_gemm", torch::kCUDA, &gptq_gemm);
+ 
+   m.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");

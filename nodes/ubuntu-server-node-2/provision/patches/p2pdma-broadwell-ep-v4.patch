@@ -1,0 +1,29 @@
+--- a/drivers/pci/p2pdma.c
++++ b/drivers/pci/p2pdma.c
+@@ -1,5 +1,26 @@
+ 	/* Intel Xeon E7 v3/Xeon E5 v3/Core i7 */
+ 	{PCI_VENDOR_ID_INTEL,	0x2f00, REQ_SAME_HOST_BRIDGE},
+ 	{PCI_VENDOR_ID_INTEL,	0x2f01, REQ_SAME_HOST_BRIDGE},
++	/*
++	 * Intel Xeon E7 v4/Xeon E5 v4/Core i7 (Broadwell-EP).
++	 *
++	 * Added locally for ubuntu-server-node-2: the Haswell-EP v4 host bridge
++	 * (8086:6f00 / 8086:6f01) is functionally the same P2PDMA-capable root
++	 * complex as the v3 parts already listed above, but was never added
++	 * upstream. Without this entry any peer-to-peer transfer involving this
++	 * host bridge is rejected, so HIP/RCCL silently fall back to host-staged
++	 * copies (~3-6 GB/s instead of ~10 GB/s).
++	 *
++	 * REQ_SAME_HOST_BRIDGE is kept, matching the v3 entries: peer traffic is
++	 * only permitted between devices under one host bridge. On this node both
++	 * GPUs hang off 00:00.0 (socket 0), so the constraint is satisfied and
++	 * cross-socket pairs remain correctly excluded.
++	 *
++	 * Verified prerequisites on this node: BIOS Above 4G Decoding + ReBAR are
++	 * enabled (BAR0 = 32 GiB), and the GPU root ports expose no ACS
++	 * capability, so neither large-BAR nor ACS is blocking P2P here.
++	 */
++	{PCI_VENDOR_ID_INTEL,	0x6f00, REQ_SAME_HOST_BRIDGE},
++	{PCI_VENDOR_ID_INTEL,	0x6f01, REQ_SAME_HOST_BRIDGE},
+ 	/* Intel Skylake-E */
+ 	{PCI_VENDOR_ID_INTEL,	0x2030, 0},

@@ -1,0 +1,144 @@
+RCCL SHM-fallback diagnosis — ubuntu-server-node-2
+Date   : 2026-09-18
+Kernel : 7.0.14-x99p2p (HIP P2P already working: peer=YES, 10.17 GB/s)
+Image  : docker.m.daocloud.io/rocm/pytorch:latest (ROCm 7.14, RCCL 2.30.4)
+
+── Measurement ─────────────────────────────────────────────────────────────
+Two-rank all-reduce (torch.distributed, NCCL backend, 256 MiB):
+
+  NCCL_P2P_LEVEL=<unset> : busbw ~5.73 GB/s
+  NCCL_P2P_LEVEL=PHB     : busbw ~5.68 GB/s
+  NCCL_P2P_LEVEL=SYS     : busbw ~5.65 GB/s
+
+All three are IDENTICAL within noise => the environment variable has NO effect.
+
+torch.cuda.can_device_access_peer(0,1) and (1,0) both return True, and the raw
+HIP probe measures 10.17 GB/s on the same hardware. RCCL delivers only ~5.7 GB/s,
+i.e. ~56% of the available peer bandwidth: the signature of a host-staged (SHM)
+round trip.
+
+── Root cause (confirmed in source) ────────────────────────────────────────
+src/graph/paths.cc, ncclTopoCheckP2p():
+
+    int p2pLevel = PATH_SYS;
+    NCCLCHECK(ncclGetUserP2pLevel(&p2pLevel));   // user sets PATH_PHB
+    ...
+    if (arch == X86 && vendor == INTEL) {
+        p2pLevel = PATH_PXB;                     // <-- OVERWRITES the user value
+    }
+    if (path->type <= p2pLevel) *p2p = 1;
+
+Path enum (src/graph/topo.h): PIX=4, PXB=5, PHB=8, SYS=9.
+
+A cross-root-port GPU pair on X99 classifies as PATH_PHB(8). The Intel clamp
+reduces p2pLevel to PATH_PXB(5), so the test becomes "8 <= 5" -> false, and the
+P2P path is rejected outright. Setting NCCL_P2P_LEVEL=PHB cannot help because the
+clamp runs AFTER the getter and discards it.
+
+Verified unchanged in ROCm/rccl develop (identical lines 323-336).
+
+── This matches the forum exactly ──────────────────────────────────────────
+lcz.me/topic/1791 #18997 reported this three-way test on X99:
+    stock RCCL + NCCL_P2P_LEVEL=PHB   -> SHM
+    patched RCCL, no PHB              -> SHM
+    patched RCCL + NCCL_P2P_LEVEL=PHB -> Direct P2P
+i.e. BOTH the patch and the env var are required. Our A/B above reproduces the
+first row precisely.
+
+── Fix ─────────────────────────────────────────────────────────────────────
+nodes/ubuntu-server-node-2/provision/patches/rccl-intel-p2p-level-override.patch
+  Captures the user level before the clamps run and re-applies it afterwards.
+  Default behaviour is unchanged when the user sets nothing.
+
+Expected result after the patch: all-reduce busbw should roughly double from
+~5.7 GB/s toward the ~10 GB/s peer-path ceiling, and the SGLang TP2 log should
+show isAllDirectP2p 1 / "via P2P/IPC".
+
+Also noted from RCCL startup warnings (cosmetic here, worth knowing):
+  - "Missing iommu=pt from kernel command line" — RCCL suggests adding it.
+  - "NUMA auto balancing enabled" — suggests kernel.numa_balancing=0 for
+    consistent performance.
+
+── ATTEMPT 1 TO BUILD PATCHED RCCL: DEAD END (2026-09-18) ──────────────────
+Goal was to build RCCL with the fix and verify all-reduce moves from SHM to P2P.
+
+What was tried:
+  1. Patch against ROCm/rccl `develop` — compiles fine, library builds (11.3 MB),
+     but the resulting librccl.so.1 fails to load against the image's stack:
+       undefined symbol: ncclSymkGetKernelPtr
+  2. Root cause: `GENERATE_SYM_KERNELS` defaults OFF, yet
+     src/scheduler/symmetric_sched.cc (unconditionally in the build) calls
+     ncclSymkGetKernelPtr(), whose definition is emitted only by
+     src/device/symmetric/generate.py when that option is ON.
+  3. Rebuilding with -DGENERATE_SYM_KERNELS=ON exposes a second, deeper
+     problem: the generator emits CUDA-only code that the HIP compiler
+     rejects on gfx1100:
+       error: use of undeclared identifier 'ncclCoopCta'
+       error: use of undeclared identifier 'cuda'   (cuda::memory_order_relaxed)
+     i.e. that source path is not properly hipified in the public tree.
+  4. AMD's pip ROCm SDK ships no RCCL source, and ROCm/rccl publishes no
+     tags/branches newer than v2.26.6 (which is the NVIDIA NCCL tree and wants
+     nvcc/cuda_runtime.h). The image's RCCL 2.30.4 comes from AMD's internal
+     "rockrel" build tree, which is not public.
+
+Conclusion: the patched-RCCL route is not achievable against this ROCm 7.14
+stack using publicly available sources. Additional obstacles already cleared
+along the way (kept here so they need not be rediscovered):
+  - the image has no /opt/rocm; ROCm lives under _rocm_sdk_{core,devel,libraries}
+  - CMake 4.4's FindThreads mis-probes the hipcc wrapper
+  - fmt is not installed and FetchContent cannot reach GitHub from inside the
+    container; vendoring fmt 10.2.1 and pointing FETCHCONTENT_SOURCE_DIR_FMT at
+    it works
+  - a built librccl needs an explicit RUNPATH pointing at
+    $ORIGIN/../../_rocm_sdk_core/lib etc., or its ROCm deps go unresolved
+  - LD_PRELOAD of a replacement librccl deadlocks this torch build; replacing
+    the file torch resolves is the workable approach
+
+IMPORTANT: none of this affects the kernel-level result. HIP P2P itself is
+working (peer=YES, 10.17 GB/s). The RCCL layer only affects how much of that
+the *collective* library chooses to use.
+
+── PROOF that the default path is SHM ──────────────────────────────────────
+Forcing the SHM path explicitly with NCCL_P2P_DISABLE=1:
+    256 MiB all-reduce busbw ~5.62 GB/s
+versus the default (P2P nominally allowed):
+    256 MiB all-reduce busbw ~5.73 GB/s
+These are identical within noise. RCCL was therefore ALREADY on the SHM path;
+the Intel PATH_PXB clamp had disabled P2P in both cases.
+
+For scale: the raw HIP peer copy on this same hardware measures 10.17 GB/s.
+
+
+══ RESOLVED 2026-09-19: RCCL SOURCE MOVED TO ROCm/rocm-systems ══════════════
+ROCm/rccl now redirects to the ROCm/rocm-systems super-repo, where RCCL lives
+at projects/rccl. Building from there succeeds where the old ROCm/rccl
+`develop` branch failed, because two things changed:
+  - GENERATE_SYM_KERNELS now defaults ON (was OFF), so the generator actually
+    emits the ncclSymkGetKernelPtr definition that symmetric_sched.cc calls.
+    The previous undefined-symbol failure cannot occur.
+  - src/device/symmetric/generate.py no longer emits CUDA-only constructs
+    (ncclCoopCta / cuda::memory_order_*), so the HIP compile succeeds.
+
+Built library: librccl.so.1.0 (40 MB), RCCL 2.31.2, gfx1100, zero undefined
+ncclSymk symbols. Requires an explicit RUNPATH (see the earlier notes) and is
+installed over the copy torch resolves. Image tag: rocm-pytorch-rccl-patched:local.
+
+── RESULT: P2P now actually used ────────────────────────────────────────────
+Two-rank all-reduce, 256 MiB, same hardware throughout:
+
+  RCCL            NCCL_P2P_LEVEL   busbw        path
+  stock 2.30.4    unset            5.66 GB/s    SHM
+  stock 2.30.4    PHB              5.68 GB/s    SHM  (env var silently ignored)
+  patched 2.31.2  unset            5.62 GB/s    SHM  (arch clamp still applies)
+  patched 2.31.2  PHB              9.61 GB/s    DIRECT P2P   <-- +70%
+
+9.61 GB/s is ~95% of the 10.17 GB/s raw HIP peer-copy ceiling, i.e. the host
+round-trip is gone. This reproduces lcz.me/topic/1791 #18997 exactly, including
+its central claim that BOTH the RCCL patch and NCCL_P2P_LEVEL=PHB are required:
+  - stock RCCL + PHB            -> SHM
+  - patched RCCL, no PHB        -> SHM
+  - patched RCCL + PHB          -> Direct P2P
+All three rows are now confirmed by direct measurement on this node.
+
+Patch: provision/patches/rccl-intel-p2p-level-override.patch (applies with
+`patch -p3` inside the rocm-systems checkout, i.e. from projects/rccl/).

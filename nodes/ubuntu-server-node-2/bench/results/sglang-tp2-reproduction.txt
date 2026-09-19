@@ -1,0 +1,87 @@
+SGLang TP=2 reproduction — ubuntu-server-node-2
+Date   : 2026-09-19
+Target : reproduce lcz.me/topic/1532 (dual 7900 XTX, SGLang gfx1100 fork,
+         Qwen3.8-27B W4A16, TP=2, MTP-3 speculative decoding)
+VERDICT: WORKING — throughput matches the post's claimed range.
+
+── Deployment ──────────────────────────────────────────────────────────────
+  Kernel  : 7.0.14-x99p2p (locally built, P2PDMA whitelist patched)
+  RCCL    : 2.31.2, patched (Intel PATH_PXB clamp removed)
+  Image   : sglang-gfx1100-x99:local
+            = rocm/pytorch (ROCm 7.14, torch 2.13) + patched RCCL
+              + SGLang StevenChenSE/sglang@gfx1100-support
+  Model   : Qwen3.8-27B-W4A16-AutoRound-GPTQ (MTP quantization_config patched)
+
+  Launch flags of note:
+    --tp-size 2 --quantization gptq --dtype bfloat16 --kv-cache-dtype auto
+    --context-length 196608 --mem-fraction-static 0.85
+    --speculative-algorithm EAGLE --speculative-num-steps 3
+    --speculative-num-draft-tokens 4
+    NCCL_P2P_LEVEL=PHB  SGLANG_RDNA_CUSTOM_AR=1
+
+── Startup evidence ────────────────────────────────────────────────────────
+  [TP0] Load weight end. mem usage=9.12 GB      <- weights split across 2 GPUs
+  [TP1] Load weight end. mem usage=9.12 GB
+  [TP0/TP1] KV Cache is allocated. dtype bfloat16, #tokens: 195013
+            (196,608 context; matches the post's ~192k with MTP enabled)
+  SGLANG_RDNA_CUSTOM_AR=1: using standalone RDNA custom allreduce extension
+            (rdna_ar_ext); sgl_kernel AR ops are overridden
+  [rdna_ar] hipIpcGetMemHandle(reg) rc=no error    <- cross-GPU IPC established
+  The server is fired up and ready to roll!
+
+── Performance ─────────────────────────────────────────────────────────────
+  Server-side (authoritative; /v1/chat/completions, 400 tokens, ignore_eos):
+      completion_tokens = 400 in 5.15 s  ->  77.7 tok/s end-to-end
+
+  Engine decode log during the same run (steady-state generation rate):
+      103.04 / 85.27 / 73.31 / 90.10 tok/s
+
+  TTFT across the smoke tests: 0.26-0.87 s   (post claims "<1s in 90% of cases")
+
+  Speculative decoding is effective:
+      accept len 2.12-3.62 of a max 4 draft tokens
+      accept rate 56-88%
+
+  COMPARISON TO THE POST (lcz.me/topic/1532):
+      post : TG 80-100 tok/s, TTFT <1 s, c=4 aggregate 147.5 tok/s
+      ours : TG 73-103 tok/s, TTFT 0.26-0.87 s  -> same regime
+
+── Measurement caveat (important) ──────────────────────────────────────────
+  A naive streaming client under-reports throughput here: reading SSE chunks
+  one at a time and timing per-chunk yields ~36 tok/s on the SAME run where the
+  engine reports 75-103 tok/s. Use non-streaming `usage.completion_tokens`
+  divided by elapsed time, or the engine's own gen-throughput log, not a
+  per-chunk streaming timer. The first measurements in this session were wrong
+  for exactly this reason and were corrected.
+
+── Build problems solved to get here (all now scripted) ────────────────────
+  1. atomicAdd ambiguity: the fork's compat.cuh defines atomicAdd(half2*,half2)
+     under USE_ROCM, which now collides with ROCm 7.14's own hip_fp16.h
+     overload. Routed 10 call sites through the file's explicit helpers.
+     NOTE: gptq_kernel.cu is the file actually compiled; gptq_kernel.hip is a
+     stale sibling not in setup_rocm.py's source list.
+  2. Wrong GPU arch: setup_rocm.py reads AMDGPU_TARGET (singular) and otherwise
+     auto-detects via torch. With no GPU visible during `docker build` it fell
+     back to gfx942 and produced a library with none of the gfx1100 kernels,
+     failing at runtime with hipErrorInvalidDeviceFunction. Fixed by exporting
+     AMDGPU_TARGET=gfx1100.
+  3. gptq_gemm arity: the op schema declared use_v2_format with a default, so
+     torch's binding exposed 7 positional args while the engine passes 8
+     ("takes 7 positional arguments but 8 were given"). Removed the default.
+  4. Stale sgl_kernel Python wrappers: only common_ops*.so was being copied
+     into the venv, so the base image's older gemm.py (7-arg gptq_gemm) shadowed
+     the fork's correct 8-arg wrapper. Fixed by copying the fork's sgl_kernel
+     *.py into site-packages too.
+  5. rdna_ar_ext missing: without pre-building scripts/rdna_ar/rdna_ar_ext.py the
+     worker logs "failed to load rdna_ar_ext" and silently falls back to NCCL.
+  6. Dependency/packaging: sglang installed with --no-deps (its declared deps are
+     CUDA-oriented), with the non-CUDA runtime set installed from
+     sglang-runtime-deps.txt. torch/torchaudio/torchvision are pinned OUT of
+     that list, otherwise pip replaces the ROCm torch with CUDA wheels and
+     torchaudio fails to load. PyPI pinned to the Tsinghua mirror.
+
+── Reproduce ───────────────────────────────────────────────────────────────
+  bash nodes/ubuntu-server-node-2/provision/build-p2p-kernel.sh prepare|build|install
+  bash nodes/ubuntu-server-node-2/provision/build-rccl-p2p.sh    prepare|build|image
+  bash nodes/ubuntu-server-node-2/provision/build-sglang-gfx1100.sh clone|image
+  bash nodes/ubuntu-server-node-2/serve/sglang-tp2.sh tp2 8080

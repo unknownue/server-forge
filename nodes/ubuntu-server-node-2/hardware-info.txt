@@ -1,0 +1,60 @@
+=== CPU ===
+Architecture:                            x86_64
+CPU(s):                                  72
+On-line CPU(s) list:                     0-71
+Model name:                              Intel(R) Xeon(R) CPU E5-2686 v4 @ 2.30GHz
+Thread(s) per core:                      2
+Core(s) per socket:                      18
+Socket(s):                               2
+CPU(s) scaling MHz:                      42%
+NUMA node(s):                            2
+NUMA node0 CPU(s):                       0-17,36-53
+NUMA node1 CPU(s):                       18-35,54-71
+
+=== RAM ===
+               total        used        free      shared  buff/cache   available
+Mem:           121Gi       4.4Gi       114Gi        38Mi       3.0Gi       117Gi
+Swap:          8.0Gi          0B       8.0Gi
+
+=== DIMM Slots ===
+dmidecode memory info not available (may need root).
+
+=== Motherboard ===
+sys_vendor:          HUANANZHI
+product_name:        
+product_version:     Default string
+board_vendor:        HUANANZHI
+board_name:          X99-8D3
+board_version:       V1.2
+bios_version:        5.11
+bios_date:           03/25/2026
+
+=== GPU Devices (lspci) ===
+05:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. [AMD/ATI] Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M] [1002:744c] (rev c8)
+08:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. [AMD/ATI] Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M] [1002:744c] (rev c8)
+
+=== Storage (lsblk) ===
+NAME          SIZE TYPE MOUNTPOINT                   FSTYPE
+loop0        66.8M loop /snap/core24/1643            squashfs
+loop1           4K loop /snap/bare/5                 squashfs
+loop2       261.3M loop /snap/firefox/8929           squashfs
+loop3       614.5M loop /snap/gnome-46-2404/164      squashfs
+loop4        91.7M loop /snap/gtk-common-themes/1535 squashfs
+loop5         1.5M loop /snap/hwctl/123              squashfs
+loop6        34.1M loop /snap/localsend/38           squashfs
+loop7         402M loop /snap/mesa-2404/1839         squashfs
+loop8        50.1M loop /snap/snapd/27710            squashfs
+loop9        50.3M loop /snap/snapd/27738            squashfs
+nvme0n1       1.8T disk                              
+├─nvme0n1p1     1G part /boot/efi                    vfat
+└─nvme0n1p2   1.8T part /                            btrfs
+
+=== LVM Volumes ===
+No LVM volumes.
+
+=== OS ===
+NAME="Ubuntu"
+VERSION="26.04.1 LTS (Resolute Raccoon)"
+
+=== Kernel ===
+Linux ubuntu-server-node-2 7.0.0-31-generic #31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026 x86_64 GNU/Linux

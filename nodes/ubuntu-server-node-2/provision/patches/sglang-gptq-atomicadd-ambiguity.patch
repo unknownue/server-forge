@@ -1,0 +1,64 @@
+--- a/python/sglang/kernels/aot/csrc/gemm/gptq/gptq_kernel.cu
++++ b/python/sglang/kernels/aot/csrc/gemm/gptq/gptq_kernel.cu
+@@ -328,8 +328,8 @@
+     half2* out = (half2*)c_.item_ptr(offset_m + m, n);
+     half2 result01 = __halves2half2(__float2half_rn(block_c[m][0]), __float2half_rn(block_c[m][1]));
+     half2 result23 = __halves2half2(__float2half_rn(block_c[m][2]), __float2half_rn(block_c[m][3]));
+-    atomicAdd(out, result01);
+-    atomicAdd(out + 1, result23);
++    atomicAdd_half2(out, result01);
++    atomicAdd_half2(out + 1, result23);
+   }
+ }
+ 
+@@ -448,8 +448,8 @@
+     half2* out = (half2*)c_.item_ptr(offset_m + m, n);
+     half2 result01 = __halves2half2(block_c[m][0], block_c[m][1]);
+     half2 result23 = __halves2half2(block_c[m][2], block_c[m][3]);
+-    atomicAdd(out, result01);
+-    atomicAdd(out + 1, result23);
++    atomicAdd_half2(out, result01);
++    atomicAdd_half2(out + 1, result23);
+   }
+ }
+ 
+@@ -571,8 +571,8 @@
+     half2* out = (half2*)c_.item_ptr(offset_m + m, n);
+     half2 result01 = __halves2half2(block_c[m][0], block_c[m][1]);
+     half2 result23 = __halves2half2(block_c[m][2], block_c[m][3]);
+-    atomicAdd(out, result01);
+-    atomicAdd(out + 1, result23);
++    atomicAdd_half2(out, result01);
++    atomicAdd_half2(out + 1, result23);
+   }
+ }
+ 
+@@ -690,8 +690,8 @@
+     half2* out = (half2*)c_.item_ptr(offset_m + m, n);
+     half2 result01 = __halves2half2(block_c[m][0], block_c[m][1]);
+     half2 result23 = __halves2half2(block_c[m][2], block_c[m][3]);
+-    atomicAdd(out, result01);
+-    atomicAdd(out + 1, result23);
++    atomicAdd_half2(out, result01);
++    atomicAdd_half2(out + 1, result23);
+   }
+ }
+ 
+@@ -1328,7 +1328,7 @@
+     k += 4;
+   }
+   for (int m = 0; m < b_end; m++) {
+-    atomicAdd(&mul[(b + m) * width + w], res[m]);
++    atomicAdd_half(&mul[(b + m) * width + w], res[m]);
+   }
+ }
+ 
+@@ -1410,7 +1410,7 @@
+     k += 2;
+   }
+   for (int m = 0; m < b_end; m++) {
+-    atomicAdd(&mul[(b + m) * width + w], res[m]);
++    atomicAdd_half(&mul[(b + m) * width + w], res[m]);
+   }
+ }
+ 

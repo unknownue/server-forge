@@ -1,0 +1,45 @@
+diff --git a/projects/rccl/src/graph/paths.cc b/projects/rccl/src/graph/paths.cc
+index 63241c0..95d5bb4 100644
+--- a/projects/rccl/src/graph/paths.cc
++++ b/projects/rccl/src/graph/paths.cc
+@@ -401,8 +401,28 @@ ncclResult_t ncclTopoCheckP2p(struct ncclComm* comm, struct ncclTopoSystem* syst
+   // In general, use P2P whenever we can.
+   int p2pLevel = PATH_SYS;
+ 
+-  // User override
+-  NCCLCHECK(ncclGetUserP2pLevel(&p2pLevel));
++  // User override.
++  //
++  // LOCAL PATCH (ubuntu-server-node-2): capture whether the user explicitly set
++  // a level BEFORE the per-architecture clamps below run, because those clamps
++  // silently discard it. On Intel x86 the clamp forces PATH_PXB(5) even when the
++  // user asked for PATH_PHB(8) via NCCL_P2P_LEVEL. A cross-root-port GPU pair on
++  // X99 classifies as PATH_PHB(8), so "path->type <= p2pLevel" becomes
++  // "8 <= 5" -> false, and RCCL drops the P2P path entirely, falling back to SHM
++  // over host memory. Measured on this node: RCCL gives ~5.7 GB/s (SHM) while the
++  // HIP peer path directly achieves 10.17 GB/s, and NCCL_P2P_LEVEL had no effect
++  // at all (unset / PHB / SYS all ~5.7 GB/s, matching NCCL_P2P_DISABLE=1).
++  //
++  // The conservative clamps remain the default (unchanged when the user says
++  // nothing); an explicit user level now wins, which is what the NCCL_P2P_LEVEL
++  // contract already promises. Mirrors the ordering fix in lcz.me/topic/1791
++  // #18997.
++  int userP2pLevel = -1;
++  {
++    int lvl = p2pLevel;
++    NCCLCHECK(ncclGetUserP2pLevel(&lvl));
++    if (lvl != p2pLevel) userP2pLevel = lvl;
++  }
+ 
+   // Don't use P2P through ARM CPUs
+   int arch, vendor, model;
+@@ -415,6 +435,9 @@ ncclResult_t ncclTopoCheckP2p(struct ncclComm* comm, struct ncclTopoSystem* syst
+     p2pLevel = PATH_PXB;
+   }
+ 
++  // An explicit user request overrides the architecture clamp above.
++  if (userP2pLevel >= 0) p2pLevel = userP2pLevel;
++
+   // Compute the PCI distance and compare with the p2pLevel.
+   // For MNNVL clique peers (IFoE cross-node), no topology edge exists between the merged GPUs,
+   // so path->type is PATH_DIS. Treat them as PATH_NVL — fabric memory handles provide direct access.

@@ -73,4 +73,6 @@ SGLang TP2 should then log isAllDirectP2p 1.
 ── Verdict ─────────────────────────────────────────────────────────────────
   HIP P2P        : WORKING (peer access granted, 10.17 GB/s)
   TP=2           : viable once RCCL is patched to stop falling back to SHM
-  DP=2           : still the zero-risk fallback, unaffected by any of this
+  DP=2           : NOT a fallback — one GPU cannot hold this model, so a
+                   per-GPU split does not fit either. Removed; see
+                   tp2-vs-dp2.txt. P2P is the only route to using both cards.

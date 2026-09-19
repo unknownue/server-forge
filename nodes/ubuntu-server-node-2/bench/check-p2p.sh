@@ -146,7 +146,8 @@ elif best > 25:
     sys.exit(0)
 else:
     print("  => TP=2 is NOT VIABLE. Cross-GPU traffic is staged through host memory.")
-    print("     Use DP=2 (one instance per GPU) instead.")
+    print("     One GPU cannot hold this model (19 GB on a 24 GB card), so a per-GPU")
+    print("     split does not fit either. Fix P2P, or serve a smaller model.")
     sys.exit(1)
 PYEOF
 
@@ -163,5 +164,5 @@ docker run --rm \
 rc=$?
 
 echo ""
-echo "Probe exit code: $rc  (0 = TP=2 viable, 1 = use DP=2, 2 = <2 GPUs)"
+echo "Probe exit code: $rc  (0 = TP=2 viable, 1 = TP=2 unusable, 2 = <2 GPUs)"
 exit $rc

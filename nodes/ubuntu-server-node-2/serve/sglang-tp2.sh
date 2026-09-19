@@ -11,8 +11,11 @@
 #   bash nodes/ubuntu-server-node-2/serve/sglang-tp2.sh [MODE] [PORT] [EXTRA_ARGS]
 #
 # MODE: tp2 (default) — one server, --tp-size 2, both cards
-#       dp2           — two independent single-GPU servers (no P2P needed)
-#       dp1           — single server on GPU 0
+#       dp1           — single server on GPU 0 (GPU 1 left free)
+#
+# There is deliberately no two-instance data-parallel mode: one GPU cannot hold
+# this model (19 GB checkpoint on a 24 GB card), so "DP=2" never started. See
+# bench/results/tp2-vs-dp2.txt.
 
 set -euo pipefail
 
@@ -164,16 +167,6 @@ case "$MODE" in
     wait_ready "$PORT"
     log "Endpoint: http://localhost:$PORT/v1"
     ;;
-  dp2)
-    for i in 0 1; do
-        CN="${CONTAINER_PREFIX}-gpu$i"; P=$((PORT + i))
-        stop_existing "$CN"
-        log "Launching DP: GPU$i -> :$P"
-        docker_base "$i" "$CN" "$P" "" >/dev/null
-    done
-    wait_ready "$PORT" && wait_ready "$((PORT + 1))"
-    log "Endpoints: :$PORT and :$((PORT + 1))"
-    ;;
   dp1)
     CN="${CONTAINER_PREFIX}-gpu0"
     stop_existing "$CN"
@@ -183,7 +176,7 @@ case "$MODE" in
     log "Endpoint: http://localhost:$PORT/v1"
     ;;
   *)
-    echo "ERROR: unknown MODE '$MODE' (expected tp2|dp2|dp1)" >&2; exit 1 ;;
+    echo "ERROR: unknown MODE '$MODE' (expected tp2|dp1)" >&2; exit 1 ;;
 esac
 
 log "Logs : docker logs -f ${CONTAINER_PREFIX}-*"

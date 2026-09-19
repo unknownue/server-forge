@@ -146,7 +146,9 @@ int main(void) {
         return 1;
     }
     printf("  => TP=2 NOT VIABLE: no peer access; traffic is staged through host memory.\n");
-    printf("     Use DP=2 (one server per GPU) instead.\n");
+    printf("     There is no working fallback on this node: one GPU cannot hold this\n");
+    printf("     model (19 GB checkpoint on a 24 GB card), so a per-GPU split does not\n");
+    printf("     fit either. Fix P2P, or serve a smaller model.\n");
     return 1;
 }
 CEOF
@@ -165,5 +167,5 @@ rc=$?
 set -e
 
 echo ""
-echo "Probe exit code: $rc   (0 = TP=2 viable, 1 = use DP=2, 2 = <2 GPUs)"
+echo "Probe exit code: $rc   (0 = TP=2 viable, 1 = TP=2 unusable, 2 = <2 GPUs)"
 exit $rc

@@ -263,8 +263,9 @@ environment quirks that had to be worked around). The patch applies with
   TP=2 must therefore run with `NCCL_P2P_LEVEL=PHB` exported, and against the
   patched RCCL image (`rocm-pytorch-rccl-patched:local`), or it silently reverts
   to the host-staged path.
-- **DP=2** (one single-GPU server per card) is unaffected by any of this and
-  remains the zero-risk multi-GPU option.
+- **There is no DP fallback.** A per-GPU data-parallel split cannot fit this
+  model (see the note below), so TP=2 with working P2P is the only way to use
+  both cards for it.
 
 ### All three layers — COMPLETE
 
@@ -282,7 +283,7 @@ against a `NCCL_P2P_DISABLE=1` run) before trusting TP=2 throughput.
 
 ```bash
 bash nodes/ubuntu-server-node-2/bench/check-p2p-hip.sh
-# exit 0 = TP=2 viable, 1 = use DP=2, 2 = fewer than 2 GPUs
+# exit 0 = TP=2 viable, 1 = TP=2 unusable, 2 = fewer than 2 GPUs
 ```
 
 Uses HIP only (no PyTorch), so it runs in the ~4 GB `rocm/rocm-terminal` image.
@@ -376,8 +377,8 @@ bash nodes/ubuntu-server-node-2/service-hub/deploy.sh   # http://localhost:9090/
 bash nodes/ubuntu-server-node-2/service-hub/stop.sh     # stops the hub only
 ```
 
-Profiles live in `profiles/` (`sglang-tp2`, `sglang-dp2`, `sglang-single`) and are
-re-read on every request, so adding a YAML file needs no restart. Switching stops
+Profiles live in `profiles/` (`sglang-tp2`, `sglang-single`) and are re-read on
+every request, so adding a YAML file needs no restart. Switching stops
 all managed containers first, then starts the target profile and waits until its
 health endpoint answers.
 
@@ -485,10 +486,10 @@ ROCm images.
 
 | Date | Issue / Action | Resolution |
 |:---|:---|:---|
-| 2026-09-19 | Measured TP=2 vs DP=2; found DP=2 cannot start | TP=2 measured at 31.8 / 41.0 / **78.7** tok/s aggregate for c=1/2/4 (256 tok, TTFT 0.26-0.53 s). **DP=2 is a hard capacity failure, not tuning**: each instance needs the whole 19 GB checkpoint on one 24 GB card, and at `--mem-fraction-static 0.90` the hybrid state cache goes negative (`rest_memory=-4.84 GB`, `max_mamba_cache_size=-18`), so both containers exit during startup. TP=2 only fits because sharding halves per-card weights to 9.12 GB. Profile kept but marked BROKEN with the reason. See `bench/results/tp2-vs-dp2.txt`. |
+| 2026-09-19 | Measured TP=2 vs DP=2; found DP=2 cannot start | TP=2 measured at 31.8 / 41.0 / **78.7** tok/s aggregate for c=1/2/4 (256 tok, TTFT 0.26-0.53 s). **DP=2 is a hard capacity failure, not tuning**: each instance needs the whole 19 GB checkpoint on one 24 GB card, and at `--mem-fraction-static 0.90` the hybrid state cache goes negative (`rest_memory=-4.84 GB`, `max_mamba_cache_size=-18`), so both containers exit during startup. TP=2 only fits because sharding halves per-card weights to 9.12 GB. The dp2 profile and launcher mode were then **removed** — it is not a tuning problem and cannot be revived by lowering the memory fraction, so keeping it risked someone selecting it and concluding the node was broken. The analysis is retained in `bench/results/tp2-vs-dp2.txt`. |
 | 2026-09-19 | Benchmark initially under-reported throughput by ~40% | The model streams a `reasoning_content` thinking channel; counting only `content` deltas dropped those tokens. c=1 aggregate was 27.9 tok/s instead of the correct 31.8. Fixed in `bench/bench-concurrency.py`, and noted as a pitfall since the same mistake flatters or deflates any comparison. |
 | 2026-09-19 | Service Hub died with the shell/session | Added a `systemd --user` unit (`service-hub.service`) plus `install-service.sh` to install/enable it reproducibly. `Restart=on-failure` verified by killing the process (came back on a new PID). Note: a user unit **cannot** depend on `docker.service` — that is a *system* unit invisible to the user manager, and `After=`/`Requires=` fails with "Unit docker.service not found"; `deploy.sh` waits for `docker info` instead. Lingering is off by default, so `sudo loginctl enable-linger $USER` is required for the hub to survive logout; the installer reports this rather than assuming it. |
-| 2026-09-19 | Added a web UI to start services without remembering commands | Built `service-hub/` (FastAPI + Vue 3), modeled on node1's. Two AMD-specific changes: GPU status is read from **sysfs** because no ROCm CLI exists on the host, and **P2P health is surfaced in the UI** because losing the patched kernel or RCCL degrades TP=2 silently rather than erroring. Added `profiles/` with `sglang-tp2`, `sglang-dp2` and `sglang-single`; verified the full cycle (stop → switch → healthy → inference) through the API. |
+| 2026-09-19 | Added a web UI to start services without remembering commands | Built `service-hub/` (FastAPI + Vue 3), modeled on node1's. Two AMD-specific changes: GPU status is read from **sysfs** because no ROCm CLI exists on the host, and **P2P health is surfaced in the UI** because losing the patched kernel or RCCL degrades TP=2 silently rather than erroring. Added `profiles/` with `sglang-tp2` and `sglang-single`; verified the full cycle (stop → switch → healthy → inference) through the API. |
 | 2026-09-19 | `serve/sglang-tp2.sh` silently exited without starting anything | Two bugs, both masked by `set -e`: (1) `stop_existing` piped to `grep -q`, and a no-match returned non-zero, aborting the script before launch; (2) the container was started with no command and the server was injected via `docker exec -d`, but the container had already exited. Fixed by collecting container ids without a failing pipe, and by making the server the container's main process. |
 | 2026-09-19 | Non-root Docker workflow settled; registry mirrors left unconfigured | Kept the **root dockerd** (rootless would not see the ~125 GB in `/data/docker`, incl. the locally-built SGLang image, and would force a save/load migration). The `docker` group already allows unprivileged container use; documented that group membership is root-equivalent. `config/set-docker-registry.sh` rewritten to configure multiple mirrors with a reachability check — the one remaining `sudo` step, and optional since builds can name the mirror per-pull. |
 | 2026-09-19 | Cleanup after reproduction | Removed 33 GB of build scratch under `tmp/` (kernel tree, RCCL and SGLang sources — all re-fetchable via the provision scripts), the leftover `probe:tmp` image (83.8 GB), the superseded `serve/sglang-gfx1100.sh`, and four obsolete scratch notes. Repository docs are the single source of truth. |

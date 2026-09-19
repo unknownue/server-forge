@@ -110,8 +110,13 @@ node1), not inside `service-hub/`.
 | Profile | GPUs | Description |
 |---------|------|-------------|
 | `sglang-tp2` | 0,1 | Qwen3.8-27B, TP=2 + MTP-3 — the reproduced topic-1532 config |
-| `sglang-dp2` | 0,1 | Two independent instances (:8080, :8081); no P2P needed |
 | `sglang-single` | 0 | One instance on GPU 0, GPU 1 left free |
+
+There is no two-instance (data-parallel) profile. Splitting per GPU would need
+each card to hold the whole 19 GB checkpoint, which does not fit alongside the
+KV and mamba state on a 24 GB card — the containers exit during startup. TP=2
+works precisely because sharding halves the per-card weights. Full analysis in
+`bench/results/tp2-vs-dp2.txt`.
 
 `stop_containers` in each profile lists every container a switch should remove,
 so switching profiles never leaves an old server holding VRAM.

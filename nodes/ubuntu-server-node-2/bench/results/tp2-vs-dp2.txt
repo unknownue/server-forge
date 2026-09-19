@@ -6,9 +6,10 @@ Hardware: 2x Radeon RX 7900 XTX, 24 GB each; patched kernel 7.0.14-x99p2p
 ═══════════════════════════════════════════════════════════════════════════
 VERDICT
 ═══════════════════════════════════════════════════════════════════════════
-TP=2 works and is the only usable dual-GPU profile.
-DP=2 as currently configured CANNOT start — it is not a tuning problem, it is
-a hard capacity limit. Details below.
+TP=2 works and is the ONLY way to use both cards for this model.
+DP=2 cannot start — not a tuning problem, a hard capacity limit. It was
+subsequently REMOVED from the repository (profile + launcher mode) rather than
+left in a broken state. This file is kept as the record of why.
 
 ═══════════════════════════════════════════════════════════════════════════
 TP=2 — measured
@@ -59,20 +60,19 @@ Why TP=2 does not hit this: sharding splits the weights, so each card holds
 only 9.12 GB of them and has room for KV and state. This is precisely the
 capability P2P unlocks, and why the three P2P layers matter here.
 
-Options if DP=2 is genuinely wanted (none tested yet, all speculative):
-  a) Lower --mem-fraction-static for the DP profile. Unlikely to be enough:
-     the deficit is 4.84 GB, and dropping the fraction also shrinks the KV
-     budget it is meant to protect.
-  b) Lower context length (196608 is a TP=2-sized choice) and drop MTP, to
-     cut the per-request state. This is the most plausible route.
-  c) Accept a smaller/less quantized model for DP, or use only one DP
-     instance and leave the other card free (that is the sglang-single
-     profile).
-  d) 4-bit KV cache instead of bf16 to shrink KV — but the fork explicitly
-     warns against FP8 KV on RDNA3, so this needs care.
+Was it worth pursuing? No, and it has been closed out:
+  - Lowering --mem-fraction-static only shrinks the same budget that is
+    already 4.84 GB short; it cannot create room.
+  - Cutting context length and MTP would recover the deficit, but produces a
+    strictly worse configuration than just running sglang-single: the same
+    model, the same total capacity, split across two endpoints and two KV
+    pools for no gain.
+  - A smaller or less quantized model would fit, but that is a different
+    serving decision, not a DP=2 fix.
 
 The honest summary: on this node, "2 GPUs" means "one 27B model served with
-TP=2", not "two independent 27B servers".
+TP=2", not "two independent 27B servers". The sglang-single profile exists
+for the case where only one card should be used.
 
 ═══════════════════════════════════════════════════════════════════════════
 Source-thread comparison

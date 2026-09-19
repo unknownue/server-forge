@@ -1,0 +1,23 @@
+# Single-GPU profile: leaves GPU 1 free for other work (e.g. a second model or a
+# benchmark run) while still serving Qwen3.8-27B on GPU 0.
+name: sglang-single
+description: "Qwen3.8-27B on GPU 0 only, GPU 1 left free"
+version: "1.0"
+
+gpu_allocation:
+  - role: llm
+    gpu: [0]
+    model: Qwen3.8-27B-W4A16-AutoRound-GPTQ
+    note: "single GPU, :8080"
+
+services:
+  - name: sglang-single
+    script: serve/sglang-tp2.sh
+    args: ["dp1", "8080"]
+    health: http://localhost:8080/health_generate
+    container_prefix: sglang-tp2
+
+stop_containers:
+  - sglang-tp2-tp2
+  - sglang-tp2-gpu0
+  - sglang-tp2-gpu1

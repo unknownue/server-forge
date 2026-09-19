@@ -1,0 +1,30 @@
+# Dual-GPU data-parallel serving profile: one independent model instance per card.
+#
+# Unlike TP=2 this needs no inter-GPU communication at all, so it works even if
+# P2P is unavailable. Trade-off: two separate models (two ports, two KV pools)
+# rather than one larger effective device.
+name: sglang-dp2
+description: "Two independent Qwen3.8-27B instances, one per GPU (no P2P needed)"
+version: "1.0"
+
+gpu_allocation:
+  - role: llm
+    gpu: [0]
+    model: Qwen3.8-27B-W4A16-AutoRound-GPTQ
+    note: "independent instance on :8080"
+  - role: llm
+    gpu: [1]
+    model: Qwen3.8-27B-W4A16-AutoRound-GPTQ
+    note: "independent instance on :8081"
+
+services:
+  - name: sglang-dp2
+    script: serve/sglang-tp2.sh
+    args: ["dp2", "8080"]
+    health: http://localhost:8080/health_generate
+    container_prefix: sglang-tp2
+
+stop_containers:
+  - sglang-tp2-tp2
+  - sglang-tp2-gpu0
+  - sglang-tp2-gpu1

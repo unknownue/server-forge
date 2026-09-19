@@ -366,6 +366,33 @@ sudo apt install -y python3-venv python3-pip
 `/data/work/cache/...`. To use the intended `/data/cache`, run
 `sudo bash scripts/fix-data-permissions.sh` (or `sudo chown "$USER" /data/cache`).
 
+## Service Hub (web UI)
+
+A local web UI for starting/stopping serve profiles and watching GPU state, so a
+post-reboot start is one click instead of a remembered command:
+
+```bash
+bash nodes/ubuntu-server-node-2/service-hub/deploy.sh   # http://localhost:9090/
+bash nodes/ubuntu-server-node-2/service-hub/stop.sh     # stops the hub only
+```
+
+Profiles live in `profiles/` (`sglang-tp2`, `sglang-dp2`, `sglang-single`) and are
+re-read on every request, so adding a YAML file needs no restart. Switching stops
+all managed containers first, then starts the target profile and waits until its
+health endpoint answers.
+
+Two things are AMD-specific versus node1's hub:
+
+- **GPU status is read from sysfs**, not `rocm-smi` — that CLI is not installed on
+  the host at all (ROCm lives in containers), and sysfs gives busy %, VRAM and
+  hwmon temperature with no extra packages and no privileged calls.
+- **P2P status is shown in the UI.** Multi-GPU profiles depend on peer access,
+  which depends on the patched kernel and patched RCCL. Losing either leaves TP=2
+  functional but silently host-staged and much slower, so the banner reports it
+  rather than leaving it to be noticed as poor throughput.
+
+See `service-hub/README.md` for the API and how to add profiles.
+
 ## Running Docker without sudo
 
 This node deliberately keeps the **root dockerd** (system service) rather than
@@ -417,20 +444,20 @@ the patched kernel still require root, by nature.
 ubuntu-server-node-2/
 ├── README.md, hardware-info.txt, download-model.sh
 ├── config/              # Node-level config (models.conf, git, docker registry)
-├── provision/           # OS provisioning scripts (one-shot, root)
-│   ├── install-packages.sh
-│   ├── install-docker.sh
-│   ├── install-rocm.sh
-│   └── allocate-storage.sh
-├── serve/               # Container launchers
-│   ├── sglang-tp2.sh              # SGLang TP=2/DP launcher
-│   └── patch-mtp-quant-config.sh  # Required model patch before SGLang load
+├── profiles/            # YAML serve profiles, switched by the Service Hub
 ├── provision/           # OS provisioning (one-shot, root)
 │   ├── install-*.sh, allocate-storage.sh
 │   ├── build-p2p-kernel.sh        # Kernel with the P2PDMA whitelist fix
 │   ├── build-rccl-p2p.sh          # Patched RCCL + derived image
 │   ├── build-sglang-gfx1100.sh    # SGLang gfx1100 fork image
-│   └── patches/                   # The three source patches
+│   └── patches/                   # The four source patches
+├── serve/               # Container launchers
+│   ├── sglang-tp2.sh              # SGLang TP=2/DP launcher
+│   └── patch-mtp-quant-config.sh  # Required model patch before SGLang load
+├── service-hub/         # Web UI: GPU status + one-click profile switching
+│   ├── deploy.sh, stop.sh
+│   ├── src/service_hub/           # FastAPI backend (sysfs GPU monitor)
+│   └── frontend/                  # Vue 3 + Vite, builds into static/
 └── bench/               # Performance tests / platform probes
     ├── check-p2p-hip.sh           # GPU P2P probe (HIP only)  ← run first
     ├── check-p2p.sh               # Same, PyTorch-based variant
@@ -438,16 +465,22 @@ ubuntu-server-node-2/
                                    # sglang-tp2-reproduction
 ```
 
-`profiles/`, `images/`, `service-hub/` will be added here once this node's actual
-workload is defined — copy the equivalent directory from
-`nodes/ubuntu26-node1-server/` when needed, and adapt `--gpus` flags from NVIDIA to
-AMD (`--device=/dev/kfd --device=/dev/dri`, with the host render/video **GIDs**
-passed via `--group-add`; the group *names* do not exist inside ROCm images).
+### Quick start after a reboot
+
+```bash
+bash nodes/ubuntu-server-node-2/service-hub/deploy.sh   # then open :9090
+```
+
+The UI shows both GPUs live and starts a serving profile in one click. Note that
+ROCm containers take `--device=/dev/kfd --device=/dev/dri` with the host
+render/video **GIDs** via `--group-add` — the group *names* do not exist inside
+ROCm images.
 
 ## Maintenance Log
 
 | Date | Issue / Action | Resolution |
 |:---|:---|:---|
+| 2026-09-19 | Added a web UI to start services without remembering commands | Built `service-hub/` (FastAPI + Vue 3), modeled on node1's. Two AMD-specific changes: GPU status is read from **sysfs** because no ROCm CLI exists on the host, and **P2P health is surfaced in the UI** because losing the patched kernel or RCCL degrades TP=2 silently rather than erroring. Added `profiles/` with `sglang-tp2`, `sglang-dp2` and `sglang-single`; verified the full cycle (stop → switch → healthy → inference) through the API. |
 | 2026-09-19 | `serve/sglang-tp2.sh` silently exited without starting anything | Two bugs, both masked by `set -e`: (1) `stop_existing` piped to `grep -q`, and a no-match returned non-zero, aborting the script before launch; (2) the container was started with no command and the server was injected via `docker exec -d`, but the container had already exited. Fixed by collecting container ids without a failing pipe, and by making the server the container's main process. |
 | 2026-09-19 | Non-root Docker workflow settled; registry mirrors left unconfigured | Kept the **root dockerd** (rootless would not see the ~125 GB in `/data/docker`, incl. the locally-built SGLang image, and would force a save/load migration). The `docker` group already allows unprivileged container use; documented that group membership is root-equivalent. `config/set-docker-registry.sh` rewritten to configure multiple mirrors with a reachability check — the one remaining `sudo` step, and optional since builds can name the mirror per-pull. |
 | 2026-09-19 | Cleanup after reproduction | Removed 33 GB of build scratch under `tmp/` (kernel tree, RCCL and SGLang sources — all re-fetchable via the provision scripts), the leftover `probe:tmp` image (83.8 GB), the superseded `serve/sglang-gfx1100.sh`, and four obsolete scratch notes. Repository docs are the single source of truth. |

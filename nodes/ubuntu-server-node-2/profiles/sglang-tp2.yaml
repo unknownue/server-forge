@@ -1,0 +1,28 @@
+# Dual-GPU tensor-parallel serving profile (the reproduced lcz.me/topic/1532 config).
+#
+# TP=2 splits one model across both cards and requires working P2P. On this node
+# that depends on the patched kernel (7.0.14-x99p2p) AND the patched RCCL, with
+# NCCL_P2P_LEVEL=PHB set — the launcher handles the env, but the kernel must be
+# the *-x99p2p build or P2P silently degrades to host staging.
+name: sglang-tp2
+description: "Qwen3.8-27B (W4A16 GPTQ) on both GPUs, TP=2 + MTP-3 speculative decoding"
+version: "1.0"
+
+gpu_allocation:
+  - role: llm
+    gpu: [0, 1]
+    model: Qwen3.8-27B-W4A16-AutoRound-GPTQ
+    note: "TP=2, 196k context, EAGLE MTP-3, RDNA custom all-reduce"
+
+services:
+  - name: sglang-tp2
+    script: serve/sglang-tp2.sh
+    args: ["tp2", "8080"]
+    health: http://localhost:8080/health_generate
+    container_prefix: sglang-tp2
+
+# Containers removed before switching to this profile.
+stop_containers:
+  - sglang-tp2-tp2
+  - sglang-tp2-gpu0
+  - sglang-tp2-gpu1

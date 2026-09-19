@@ -1,0 +1,10 @@
+[project]
+name = "service-hub"
+version = "0.1.0"
+description = "Local service management gateway for ubuntu-server-node-2 (dual AMD RX 7900 XTX)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "pyyaml>=6.0",
+]

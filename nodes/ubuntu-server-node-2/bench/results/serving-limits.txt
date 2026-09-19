@@ -1,0 +1,85 @@
+Serving limits of the live sglang-tp2 profile
+Date  : 2026-09-19
+Model : Qwen3.8-27B-W4A16-AutoRound-GPTQ
+Node  : 2x RX 7900 XTX, patched kernel 7.0.14-x99p2p
+
+Measured against the running server; the requested values come from
+serve/sglang-tp2.sh and the enforced ones from the engine's startup log.
+
+═══════════════════════════════════════════════════════════════════════════
+CONTEXT
+═══════════════════════════════════════════════════════════════════════════
+  --context-length        196608      (192 KiB, requested)
+  KV cache token budget   232392      (max_total_num_tokens, as enforced)
+  KV dtype                bfloat16    (NOT fp8: the fork warns against fp8 KV
+                                       on RDNA3, and --kv-cache-dtype auto
+                                       resolves to bf16 here)
+  KV size per GPU         3.55 GB K + 3.55 GB V, plus 0.22 GB draft K/V for MTP
+
+Note the budget (232,392) EXCEEDS the context window (196,608). That is
+correct and expected: the pool is shared across concurrent requests, so it can
+hold more tokens in total than any single request may use. One request is
+still capped at 196,608.
+
+Verified end to end, not just read off the flag:
+  ~100k prompt -> prompt_tokens=100066  OK
+  ~180k prompt -> prompt_tokens=180067  OK
+  ~196k prompt -> prompt_tokens=196060  OK   (essentially the full window)
+The 196k case returned in 51 s, faster than the smaller probes because its
+prefix was already in the radix cache from the previous call.
+
+═══════════════════════════════════════════════════════════════════════════
+CONCURRENCY
+═══════════════════════════════════════════════════════════════════════════
+  --max-running-requests  4      (the real constraint)
+  --max-mamba-cache-size  20
+  --chunked-prefill-size  4096
+  --max-prefill-tokens    16384
+
+"4" is the number of requests decoded simultaneously, not a request cap on
+clients: the scheduler ADMITS 4 and QUEUES the rest. An 8-way burst returned
+8/8 successfully, served in two waves:
+
+  8 concurrent x 200 tokens -> 8 ok, wall 9.1 s, 1600 tokens, 175.4 tok/s agg
+    req0 9.00s   req1 5.09s   req2 8.95s   req3 5.09s
+    req4 9.12s   req5 4.77s   req6 8.86s   req7 5.64s
+  Two clusters at ~5 s and ~9 s = the second wave waiting for a slot.
+
+So requests are never rejected for concurrency; they wait. Latency degrades
+in steps of roughly one batch time as load exceeds 4.
+
+═══════════════════════════════════════════════════════════════════════════
+CONCURRENCY vs THROUGHPUT (from tp2-vs-dp2.txt, 256-token requests)
+═══════════════════════════════════════════════════════════════════════════
+  conc 1 -> 31.8 tok/s aggregate, 34.5 per-stream, TTFT p50 0.26 s
+  conc 2 -> 41.0 tok/s aggregate, 27.7 per-stream
+  conc 4 -> 78.7 tok/s aggregate, 21.6 per-stream, TTFT p50 0.31 s
+  conc 8 -> 175.4 tok/s aggregate (this note; shorter 200-token requests)
+
+Read the two tables together: past 4 concurrent the engine keeps batching
+queued work, so aggregate throughput stays high while per-request latency
+grows. Good for batch/offline work, poor for many interactive users at once.
+
+═══════════════════════════════════════════════════════════════════════════
+MEMORY
+═══════════════════════════════════════════════════════════════════════════
+  --mem-fraction-static   0.90  -> ~21.6 GB per 24 GB card
+  weights                 9.12 GB per GPU (TP=2 halves the 19 GB checkpoint)
+  observed in use         card0 21637 MiB / card1 20980 MiB
+  headroom reported       3.93 GB available
+
+That headroom is thin. Raising --max-running-requests is the obvious lever for
+more concurrency and it is precisely what consumes this margin, so any increase
+should be measured, not assumed.
+
+═══════════════════════════════════════════════════════════════════════════
+OTHER ACTIVE SETTINGS
+═══════════════════════════════════════════════════════════════════════════
+  --tp-size 2                    weights sharded across both cards
+  --speculative-algorithm EAGLE  MTP-3, accept len 2.12-3.62 of max 4,
+  --speculative-num-steps 3      accept rate 56-88%
+  --cuda-graph-bs-decode 1 2 4   CUDA graphs for the batch sizes used
+  --attention-backend triton
+  --sleep-on-idle                releases memory when idle
+  NCCL_P2P_LEVEL=PHB             required, else RCCL silently uses SHM
+  SGLANG_RDNA_CUSTOM_AR=1        fork's RDNA all-reduce

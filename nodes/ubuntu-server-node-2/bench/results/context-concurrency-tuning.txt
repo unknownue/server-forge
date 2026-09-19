@@ -1,3 +1,7 @@
+NOTE: this file's framing of the KV pool as a surplus to redistribute was
+wrong -- the pool is the scarce resource and the WINDOW was the waste.
+See context-256k.txt, which supersedes the recommendation here.
+
 Context / concurrency tuning for sglang-tp2
 Date : 2026-09-19
 Goal : concurrency 2, keep the full 196,608 window, spend as much of each

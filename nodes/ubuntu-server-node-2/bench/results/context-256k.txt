@@ -1,0 +1,71 @@
+256K context on Qwen3.8-27B / 2x RX 7900 XTX
+Date : 2026-09-19
+
+═══════════════════════════════════════════════════════════════════════════
+OUTCOME: 256K WORKS
+═══════════════════════════════════════════════════════════════════════════
+The model's max_position_embeddings is 262144 (256K) with no rope_scaling, so
+that is a hard training limit, not a soft one. The window was previously set
+to 196608 (192K), i.e. 64K below what the model supports, purely by our own
+flag. Raised to 262144 and verified with real prompts:
+
+  target ~200k -> prompt_tokens=199858  OK  (316 s)
+  target ~240k -> prompt_tokens=239854  OK  (115 s)
+  target ~260k -> prompt_tokens=259852  OK  ( 65 s)
+
+The decreasing times are the radix cache: each successive prompt shared its
+prefix with the previous one, so prefill work fell. The first (cold) 200k
+prefill taking 316 s is the representative figure for fresh long input.
+
+Zero OOM / RuntimeError / kill in the container log across the whole test.
+Peak VRAM after the 260k request: 24135 / 24560 MiB (card0),
+23494 / 24560 MiB (card1).
+
+A request genuinely exceeding the window is rejected cleanly rather than
+mis-served:
+  "The input (262205 tokens) is longer than the model's context length
+   (262144 tokens)."  HTTP 400
+
+═══════════════════════════════════════════════════════════════════════════
+CORRECTION TO AN EARLIER CLAIM IN THIS REPO
+═══════════════════════════════════════════════════════════════════════════
+context-concurrency-tuning.txt framed the pool as having a surplus that could
+be handed to more concurrency. That was backwards. The arithmetic:
+
+  model cap per request     262,144
+  2 requests at that cap    524,288
+  KV pool                   284,416
+  ─────────────────────────────────
+  shortfall                 239,872
+
+The pool is the SCARCE resource, not a surplus. What was being wasted was the
+WINDOW: set 64K below the model's own limit. Raising it recovers capacity that
+was there all along; it does not create any.
+
+═══════════════════════════════════════════════════════════════════════════
+CONSEQUENCE FOR CONCURRENCY 2
+═══════════════════════════════════════════════════════════════════════════
+With the window at 256K, the pool holds only 284,416 - 262,144 = 22,272 tokens
+beyond one full-window request. Two concurrent requests therefore cannot both
+approach 256K: the second is queued or preempted until the first releases KV.
+
+  window 192K: 2 x 196608 = 393,216  -> short by 108,800
+  window 256K: 2 x 262144 = 524,288  -> short by 239,872
+
+Neither window lets two requests each use the full window. The difference is
+which extreme is served: 256K maximises a SINGLE request (deep-dive analysis,
+whole-repo reasoning), 192K balances two long-ish requests.
+
+--max-running-requests stays at 2 so a second request is admitted and queued
+rather than rejected; it simply waits for KV to free up.
+
+═══════════════════════════════════════════════════════════════════════════
+SETTING SUMMARY
+═══════════════════════════════════════════════════════════════════════════
+  --context-length        262144   (was 196608; the model's true limit)
+  --mem-fraction-static   0.96
+  --max-running-requests  2
+  KV pool                 284,416 tokens
+  KV cost                 0.03126 MiB/token/GPU (16 of 64 layers are full
+                          attention; the rest are linear and use the
+                          fixed-size mamba cache)

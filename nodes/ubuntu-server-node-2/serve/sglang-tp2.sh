@@ -102,7 +102,7 @@ serve_args() {
 --mamba-ssm-dtype bfloat16 \
 --kv-cache-dtype auto \
 --attention-backend triton \
---context-length 196608 \
+--context-length 262144 \
 --mem-fraction-static 0.96 \
 --max-running-requests 2 \
 --max-mamba-cache-size 20 \

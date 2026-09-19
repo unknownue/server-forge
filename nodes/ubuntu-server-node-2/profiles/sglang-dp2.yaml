@@ -1,10 +1,21 @@
 # Dual-GPU data-parallel serving profile: one independent model instance per card.
 #
-# Unlike TP=2 this needs no inter-GPU communication at all, so it works even if
-# P2P is unavailable. Trade-off: two separate models (two ports, two KV pools)
-# rather than one larger effective device.
+# Unlike TP=2 this needs no inter-GPU communication at all, so in principle it
+# works even when P2P is unavailable. Trade-off: two separate models (two ports,
+# two KV pools) rather than one larger effective device.
+#
+# ⚠ KNOWN BROKEN as configured — see bench/results/tp2-vs-dp2.txt.
+# Each instance must hold the WHOLE 19 GB checkpoint on one 24 GB card, and at
+# the shared --mem-fraction-static 0.90 that leaves a negative remainder for the
+# hybrid state cache, so the containers exit during startup with:
+#     Not enough GPU memory for hybrid (mamba/linear-attention) state cache.
+#     Computed max_mamba_cache_size=-18 (total_rest_memory=-4.84 GB)
+# TP=2 avoids this only because sharding halves the per-card weights (9.12 GB).
+# To make DP viable, drop the context length / MTP and lower the mem fraction
+# for this profile specifically; the shared serve_args are sized for TP=2.
+# Left in place as a documented dead end rather than silently deleted.
 name: sglang-dp2
-description: "Two independent Qwen3.8-27B instances, one per GPU (no P2P needed)"
+description: "Two independent Qwen3.8-27B instances, one per GPU (BROKEN: model does not fit per card)"
 version: "1.0"
 
 gpu_allocation:

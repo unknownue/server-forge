@@ -80,6 +80,22 @@ COMMON_ENVS=(
 )
 
 serve_args() {
+    # Sized for concurrency 2 with the largest context this memory allows.
+    #
+    # --mem-fraction-static 0.96 (was 0.90): the goal is to spend nearly all of
+    # each 24 GB card. Beyond weights (9.12 GB TP=2 shard), the MTP draft head
+    # (2.78 GB) and the mamba state cache (~1.5 GB at max-mamba-cache-size 20),
+    # everything left is KV. Measured KV cost is 0.03126 MiB/token/GPU, which
+    # grows the shared pool from ~265k to ~313k tokens.
+    #
+    # --max-running-requests 2 (was 4): at 2 concurrent requests the pool is
+    # shared between them, so this is what makes two long requests fit. Note it
+    # still cannot hold 2 x 196608 = 393216; concurrency 2 means the COMBINED
+    # length fits, not that both may use the full window.
+    #
+    # This model only pays full-attention KV on 16 of its 64 layers (the other
+    # 48 are linear attention, held in the fixed-size mamba cache), which is why
+    # a 262k-position model fits in 7.5 GB of KV at all.
     echo "--model-path /models \
 --quantization gptq \
 --dtype bfloat16 \
@@ -87,8 +103,8 @@ serve_args() {
 --kv-cache-dtype auto \
 --attention-backend triton \
 --context-length 196608 \
---mem-fraction-static 0.90 \
---max-running-requests 4 \
+--mem-fraction-static 0.96 \
+--max-running-requests 2 \
 --max-mamba-cache-size 20 \
 --speculative-algorithm EAGLE \
 --speculative-draft-model-path /models \

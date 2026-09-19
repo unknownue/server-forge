@@ -10,6 +10,8 @@ serve/sglang-tp2.sh and the enforced ones from the engine's startup log.
 CONTEXT
 ═══════════════════════════════════════════════════════════════════════════
   --context-length        196608      (192 KiB, requested)
+  (mem-fraction / concurrency were later retuned -- see
+   context-concurrency-tuning.txt; pool is now 284777 at c=2)
   KV cache token budget   232392      (max_total_num_tokens, as enforced)
   KV dtype                bfloat16    (NOT fp8: the fork warns against fp8 KV
                                        on RDNA3, and --kv-cache-dtype auto
@@ -31,7 +33,7 @@ prefix was already in the radix cache from the previous call.
 ═══════════════════════════════════════════════════════════════════════════
 CONCURRENCY
 ═══════════════════════════════════════════════════════════════════════════
-  --max-running-requests  4      (the real constraint)
+  --max-running-requests  2      (retuned from 4; see context-concurrency-tuning.txt)
   --max-mamba-cache-size  20
   --chunked-prefill-size  4096
   --max-prefill-tokens    16384

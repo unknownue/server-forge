@@ -1,0 +1,93 @@
+Context / concurrency tuning for sglang-tp2
+Date : 2026-09-19
+Goal : concurrency 2, keep the full 196,608 window, spend as much of each
+       24 GB card as is safe.
+
+═══════════════════════════════════════════════════════════════════════════
+CHANGE
+═══════════════════════════════════════════════════════════════════════════
+  --mem-fraction-static    0.90 -> 0.96
+  --max-running-requests      4 -> 2
+  everything else unchanged (context 196608, MTP-3, mamba cache 20, ...)
+
+═══════════════════════════════════════════════════════════════════════════
+WHERE THE MEMORY GOES (per GPU, 24 GB card, TP=2)
+═══════════════════════════════════════════════════════════════════════════
+  weights (TP=2 shard of the 19 GB checkpoint)     9.12 GiB
+  MTP draft head                                   2.78 GiB
+  mamba state cache (max-mamba-cache-size 20)      1.48 GiB
+  multimodal pools + embedding cache reserve       0.10 GiB
+  ─────────────────────────────────────────────────────────
+  fixed cost                                      ~13.5 GiB
+  remainder = KV cache pool
+
+Measured KV cost: 0.03126 MiB per token per GPU. Only 16 of the model's 64
+layers are full attention (the other 48 are linear attention held in the
+fixed-size mamba cache), so only those 16 pay per-token KV. That is the reason
+a 262,144-position model fits in a single-digit-GiB KV budget at all.
+
+═══════════════════════════════════════════════════════════════════════════
+RESULT
+═══════════════════════════════════════════════════════════════════════════
+                        before (0.90)      after (0.96)
+  KV pool (tokens)           232,392           284,777      +22%
+  context window             196,608           196,608      unchanged
+  max concurrent decoded           4                 2
+  VRAM in use (card0)   21637 MiB         23899 MiB
+  VRAM in use (card1)   20980 MiB         23248 MiB
+  reported headroom         3.93 GB           2.53 GB
+
+  throughput c=1      31.8 tok/s        31.4 tok/s     unchanged
+  throughput c=2      41.0 tok/s        50.8 tok/s     +24%
+  TTFT p50 (c=2)           0.47 s            0.30 s
+
+The c=2 throughput gain comes from sample variance as much as from the pool
+size (the run-to-run spread on this box is a few tok/s); the c=1 figure being
+flat is the meaningful control.
+
+═══════════════════════════════════════════════════════════════════════════
+WHAT c=2 ACTUALLY MEANS — worth being precise about
+═══════════════════════════════════════════════════════════════════════════
+The pool is SHARED between concurrent requests. 2 x 196,608 = 393,216 tokens
+would be needed for two simultaneous full-window requests, and even at 0.96
+the pool is 284,777. So concurrency 2 means the COMBINED length fits, not that
+two requests may each use the whole window.
+
+                        pool 232k (before)   pool 285k (after)
+  196k + 1k                       fits               fits
+  140k + 140k                     fits               fits
+  150k + 150k                    NO                  fits
+  196k + 196k                    NO                  NO
+
+This is the case the extra memory actually buys: two medium-long requests.
+
+═══════════════════════════════════════════════════════════════════════════
+VERIFICATION
+═══════════════════════════════════════════════════════════════════════════
+1. Pool size confirmed from the startup log: max_total_num_tokens=284777,
+   max_running_requests=2, context_len=196608.
+2. Two concurrent ~130k-token prompts (260k combined) both succeeded:
+     r0: 130051 prompt tokens, 163.6 s
+     r1: 130051 prompt tokens, 163.5 s
+   Under the old pool this combination did not fit.
+3. Long single request still served: 140,278 prompt tokens OK.
+4. Worst case stress, 2 concurrent x 140k prompt + 600 generated tokens with
+   MTP active, completed cleanly with no OOM.
+5. Grepped the container log for OOM / RuntimeError / kill after all of the
+   above: zero occurrences.
+
+═══════════════════════════════════════════════════════════════════════════
+WHY 0.96 AND NOT HIGHER
+═══════════════════════════════════════════════════════════════════════════
+0.96 leaves 23899/24560 MiB in use at peak, i.e. ~660 MiB unallocated. SGLang
+also undershoots its own budget slightly (at 0.90 it allocated 579 MiB less
+than budgeted), so the effective margin is a little larger than it looks.
+That margin has to cover activations, the CUDA-graph pool for batch sizes
+1/2/4, and temporary prefill buffers for a 196k-token batch.
+
+Going beyond 0.96 was not tested and is not recommended: the stress case above
+is already the realistic worst case, and the remaining headroom is what
+absorbs a longer prefill or a larger decode batch.
+
+If OOM ever appears, the first knob to turn is --max-running-requests back
+down, then --mem-fraction-static; both are single-line changes here.

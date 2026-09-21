@@ -1,0 +1,60 @@
+# ARCHIVED 2026-09-21 — inactive, kept only because it was never committed.
+#
+# This was the localhost-only DeepSeek-V4.1-Flash profile
+# (`name: "dsv41-flash-3c-620k"`). It was removed from the Service Hub's roster so
+# that selecting this model can never silently hide it from LAN clients: the node
+# now has exactly one dsv41 profile, dsv41-flash-3c-620k-lan, which publishes on
+# 0.0.0.0:8010.
+#
+# It is archived here rather than deleted because `git ls-files` showed it as
+# untracked — it had never been committed, so a plain `rm` would have been
+# unrecoverable. This file is inert: Service Hub discovers profiles with
+# glob("profiles/*.yaml"), which does not match this ".yaml.removed" name.
+#
+# Line numbers 26 onward below are a faithful reconstruction of the deleted file;
+# lines 1-25 are its original text as read before deletion.
+#
+# --- original content follows ---
+# DeepSeek-V4.1-Flash — 4 GPUs, 3 concurrent long-context sessions.
+#
+# Measured on this node (benchmarks/matrix.py, 8192-token outputs, three
+# independent prefixes, chunked_prefill_size=256):
+#   620k x 3 -> successes 3/3, peak_client_overlap 3, TTFT 1451 s,
+#               decode 108 tok/s per request, 323 tok/s aggregate, 0 OOM
+#   500k x 3 -> overlap 3, TTFT 942 s, 114 / 330 tok/s
+#   640k x 3 -> overlap 2 (over-subscribed: the third request queues)
+#
+# The hard ceiling is the device KV pool, not this profile:
+#   pool 1,908,480 tokens (1,743 B/token) / 3 = 636,160 tokens per request.
+#   The pool is capped by memory (85 GB cards leave ~7.4 GB per GPU after the
+#   74.70 GB of weights) and cannot be raised: DeepSeek-V4 accepts only
+#   fp8_e4m3/bf16 KV (already fp8), --cpu-offload-gb hits a TVM-FFI device
+#   mismatch, expandable_segments corrupts output, and HiSparse is gated off
+#   for this model.
+#
+# Cost profile: the first request on a cold prefix pays a 24-minute prefill.
+# Every later request sharing that prefix hits the radix cache and returns its
+# first token in ~0.7 s, so a long-lived session is fast after the first turn.
+#
+# API: http://127.0.0.1:8010 (key in submodules/deepseek-v4.1-flash-4x-rtx-pro-6000/state/api-key)
+# For a single 1M-token request instead, use serve args ["1048576", "1"].
+name: "dsv41-flash-3c-620k"
+description: "DeepSeek-V4.1-Flash TP4/EP4 + DSpark, 3 x 620k concurrent, ~108 tok/s/req (pool-limited)"
+version: "1.0"
+
+gpu_allocation:
+  - gpu: [0, 1, 2, 3]
+    role: "text-inference"
+    model: "deepseek-ai/DeepSeek-V4.1-Flash"
+    model_short: "DeepSeek-V4.1-Flash-3C"
+    port: 8010
+    tp: 4
+    container_name: "dsv41-flash"
+    serve:
+      script: "serve/dsv41-flash.sh"
+      args:
+        - "620000"
+        - "3"
+
+stop_containers:
+  - "dsv41-flash"

@@ -1,0 +1,62 @@
+# DeepSeek-V4.1-Flash — 4 GPUs, 3 concurrent long-context sessions, published on the LAN.
+#
+# This is the node's only DeepSeek-V4.1-Flash profile: the endpoint is always
+# published on 0.0.0.0:8010. A localhost-only variant used to exist as a separate
+# profile; it was removed so that switching to this model can never silently hide
+# it from the LAN clients that depend on it.
+#
+# SECURITY: the API key is the only authentication and this node runs no firewall
+# (ufw, firewalld, nftables and iptables are all inactive). Anyone on
+# 192.168.50.0/24 who has the key can use this endpoint. The key lives at
+# submodules/deepseek-v4.1-flash-4x-rtx-pro-6000/state/api-key — treat it as a LAN
+# secret, and rotate it by deleting that file and restarting (boot.py regenerates
+# it) if it leaks.
+#
+# Clients point at http://192.168.50.193:8010/v1 . That address is a DHCP lease and
+# can change, so prefer the mDNS name ubuntu26-node1-server.lan (verified to resolve
+# on this node), or reserve a static lease on the router. Verified on the DSH side
+# with a matching `llm-pi-ai.providers` entry (api: openai-completions).
+#
+# Capacity — measured on this node (benchmarks/matrix.py, 8192-token outputs, three
+# independent prefixes, chunked_prefill_size=256):
+#   620k x 3 -> successes 3/3, peak_client_overlap 3, TTFT 1451 s,
+#               decode 108 tok/s per request, 323 tok/s aggregate, 0 OOM
+#   500k x 3 -> overlap 3, TTFT 942 s, 114 / 330 tok/s
+#   640k x 3 -> overlap 2 (over-subscribed: the third request queues)
+#
+# The hard ceiling is the device KV pool, not this profile:
+#   pool 1,953,792 tokens (1,743 B/token/rank) / 3 = 647,168 tokens per request,
+#   minus the per-request output reserve. The pool is capped by VRAM (85 GB cards
+#   leave ~2.5 GB per GPU after the 74.70 GB of weights) and cannot be raised:
+#   DeepSeek-V4 accepts only fp8_e4m3/bf16 KV (already fp8), --cpu-offload-gb hits a
+#   TVM-FFI device mismatch, expandable_segments corrupts output, HiSparse is gated
+#   off for this model, and raising --max-total-tokens to 3000000 only reached
+#   2,030,592. The pool itself uses ~12.69 GiB of the 83,069 MiB drawn per GPU.
+#
+# Cost profile: the first request on a cold prefix pays a ~24-minute prefill.
+# Every later request sharing that prefix hits the radix cache and returns its
+# first token in ~0.7 s, so a long-lived session is fast after the first turn.
+#
+# The API key is in submodules/deepseek-v4.1-flash-4x-rtx-pro-6000/state/api-key.
+# For a single 1M-token request instead, use serve args ["1048576", "1"].
+name: "dsv41-flash-3c-620k-lan"
+description: "DeepSeek-V4.1-Flash TP4/EP4 + DSpark, 3 x 620k concurrent, ~108 tok/s/req (pool-limited), LAN-visible on 0.0.0.0:8010"
+version: "1.0"
+
+gpu_allocation:
+  - gpu: [0, 1, 2, 3]
+    role: "text-inference"
+    model: "deepseek-ai/DeepSeek-V4.1-Flash"
+    model_short: "DeepSeek-V4.1-Flash-3C"
+    port: 8010
+    tp: 4
+    container_name: "dsv41-flash"
+    serve:
+      script: "serve/dsv41-flash.sh"
+      args:
+        - "620000"
+        - "3"
+        - "0.0.0.0"
+
+stop_containers:
+  - "dsv41-flash"

@@ -62,6 +62,7 @@ Interactive API docs: http://localhost:9090/docs
 | `web-server-reasoning` | 0,1,2,3 | R1-Distill-32B + MoE + 2×27B |
 | `qwen38-dspark-1gpu` | 0 | Qwen3.8-27B-NVFP4 DSPARK, 131K ctx, balanced (4.9 GiB headroom) |
 | `qwen38-dspark-2gpu` | 0,1 | Qwen3.8-27B-NVFP4 DSPARK TP=2, 256K model len (~227K+ usable, ~7 GiB/GPU headroom) |
+| `dsv41-flash-3c-620k-lan` | 0,1,2,3 | DeepSeek-V4.1-Flash TP4/EP4 + DSpark, 3 × 620k concurrent long sessions, published on `0.0.0.0:8010` for other machines on `192.168.50.0/24` (24 min cold prefill, then ~0.7 s cached turns). The API key is the only authentication — this node runs no firewall; see the profile's header. This is the node's only dsv41 profile: a localhost-only variant was removed so selecting the model cannot silently hide it from the LAN |
 | `unsloth` | 0,1,2,3 | Unsloth Studio (training) |
 | `anim-lab` | 0 | ComfyUI FLUX.2 image/video generation |
 

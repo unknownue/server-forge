@@ -21,6 +21,23 @@ fi
 
 FORGE_NODE_DIR="${FORGE_REPO_ROOT}/nodes/${FORGE_NODE_HOSTNAME}"
 
+# A node directory may be named differently from the machine's reported
+# hostname (e.g. macOS reports an mDNS name like `<host>.local` while the
+# directory uses a short, human-chosen name). An alias file at
+# nodes/<dirname>/.hostname records the hostname that maps to that directory:
+#   nodes/mac-mini-m4/.hostname  ->  unknownue-servers-Mac-mini.local
+# Resolve the alias when the direct hostname match does not exist.
+if [[ ! -d "$FORGE_NODE_DIR" ]]; then
+    for alias_file in "${FORGE_REPO_ROOT}"/nodes/*/.hostname; do
+        [[ -f "$alias_file" ]] || continue
+        if [[ "$(head -n1 "$alias_file" | tr -d '[:space:]')" == "$FORGE_NODE_HOSTNAME" ]]; then
+            FORGE_NODE_DIR="$(dirname "$alias_file")"
+            echo "[discover] Hostname '${FORGE_NODE_HOSTNAME}' aliased to node directory: ${FORGE_NODE_DIR}"
+            break
+        fi
+    done
+fi
+
 if [[ -d "$FORGE_NODE_DIR" ]]; then
     echo "[discover] Found node directory: ${FORGE_NODE_DIR}"
     export FORGE_NODE_HOSTNAME FORGE_NODE_DIR FORGE_REPO_ROOT

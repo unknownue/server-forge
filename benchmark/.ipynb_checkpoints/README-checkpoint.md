@@ -1,6 +1,6 @@
 # Benchmark Suite
 
-LLM inference performance tests for AI training servers.
+LLM inference performance tests for the fleet's GPU nodes.
 
 ## Quick Start
 

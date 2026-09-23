@@ -1,0 +1,171 @@
+=== CPU ===
+Model Name: Mac mini
+Model Identifier: Mac16,10
+Chip: Apple M4
+Total Number of Cores: 10 (4 performance and 6 efficiency)
+Memory: 16 GB
+Serial Number (system): C2F293396C
+Hardware UUID: 4374DA29-65AB-5E2D-85F7-E9DB47DD7A6D
+
+SoC topology:
+  Performance cores: 4
+  Efficiency cores:  6
+  Logical CPUs:      10
+  Architecture:      arm64
+
+=== RAM ===
+Total: 16 GB (17179869184 bytes)
+
+NOTE: Apple Silicon uses unified memory soldered to the SoC package.
+      No DIMM slots — memory is NOT upgradeable after purchase.
+      The GPU shares this same 16 GB pool (no dedicated VRAM).
+
+=== Motherboard (Logic Board) ===
+|   "manufacturer" = <"Apple Inc.">
+|   "IOPlatformSerialNumber" = "C2F293396C"
+|   "regulatory-model-number" = <4133323338000000000000000000000000000000000000000000000000000000>
+|   "model" = <"Mac16,10">
+|   "model-number" = <5a31434630303033360000000000000000000000000000000000000000000000>
+|   "model-config" = <"SNY;MoPED=0x67C6640C540B4E13FB2B7A98042E5546AA4BBCE7">
+
+=== Boot / Firmware ===
+System Firmware Version: 11881.61.3
+OS Loader Version: 11881.61.3
+Provisioning UDID: 00008132-001828E20A45001C
+
+Secure Enclave / boot policy:
+  bputil available — run 'sudo bputil -d' manually to inspect boot policy.
+
+=== GPU Devices ===
+Chipset Model: Apple M4
+Type: GPU
+Bus: Built-In
+Total Number of Cores: 10
+Vendor: Apple (0x106b)
+Metal Support: Metal 3
+Resolution: 1920 x 1080 (1080p FHD - Full High Definition)
+Main Display: Yes
+
+NOTE: Integrated Apple GPU — no discrete GPU, no NVIDIA/CUDA, no ROCm.
+      Accelerators available: Metal 3 / MPS (PyTorch 'mps' device), CoreML, MLX.
+
+=== Storage (diskutil) ===
+/dev/disk0 (internal, physical):
+   #:                       TYPE NAME                    SIZE       IDENTIFIER
+   0:      GUID_partition_scheme                        *251.0 GB   disk0
+   1:             Apple_APFS_ISC Container disk1         524.3 MB   disk0s1
+   2:                 Apple_APFS Container disk3         245.1 GB   disk0s2
+   3:        Apple_APFS_Recovery Container disk2         5.4 GB     disk0s3
+
+/dev/disk3 (synthesized):
+   #:                       TYPE NAME                    SIZE       IDENTIFIER
+   0:      APFS Container Scheme -                      +245.1 GB   disk3
+                                 Physical Store disk0s2
+   1:                APFS Volume Macintosh HD            11.2 GB    disk3s1
+   2:              APFS Snapshot com.apple.os.update-... 11.2 GB    disk3s1s1
+   3:                APFS Volume Preboot                 6.9 GB     disk3s2
+   4:                APFS Volume Recovery                2.0 GB     disk3s3
+   5:                APFS Volume Data                    127.7 GB   disk3s5
+   6:                APFS Volume VM                      1.1 GB     disk3s6
+
+
+=== APFS Containers ===
+APFS Container Reference:     disk3
+Size (Capacity Ceiling):      245107195904 B (245.1 GB)
+Capacity In Use By Volumes:   148970848256 B (149.0 GB) (60.8% used)
+Capacity Not Allocated:       96136347648 B (96.1 GB) (39.2% free)
+|   Name:                      Macintosh HD (Case-insensitive)
+|   Mount Point:               Not Mounted
+|   Capacity Consumed:         11201196032 B (11.2 GB)
+|   FileVault:                 No (Encrypted at rest)
+|   Snapshot Mount Point:      /
+|   Name:                      Preboot (Case-insensitive)
+|   Mount Point:               /System/Volumes/Preboot
+|   Capacity Consumed:         6850146304 B (6.9 GB)
+|   FileVault:                 No
+|   Name:                      Recovery (Case-insensitive)
+|   Mount Point:               Not Mounted
+|   Capacity Consumed:         1992605696 B (2.0 GB)
+|   FileVault:                 No
+|   Name:                      Data (Case-insensitive)
+|   Mount Point:               /System/Volumes/Data
+|   Capacity Consumed:         127712600064 B (127.7 GB)
+|   FileVault:                 No (Encrypted at rest)
+Name:                      VM (Case-insensitive)
+Mount Point:               /System/Volumes/VM
+Capacity Consumed:         1073782784 B (1.1 GB)
+FileVault:                 No
+
+=== Filesystem Usage ===
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s1s1   228Gi    10Gi    90Gi    11%    412k  939M    0%   /
+devfs            200Ki   200Ki     0Bi   100%     692     0  100%   /dev
+/dev/disk3s6     228Gi   1.0Gi    90Gi     2%       1  939M    0%   /System/Volumes/VM
+/dev/disk3s2     228Gi   6.4Gi    90Gi     7%     595  939M    0%   /System/Volumes/Preboot
+/dev/disk3s4     228Gi   3.1Mi    90Gi     1%      26  939M    0%   /System/Volumes/Update
+/dev/disk1s2     500Mi   6.0Mi   483Mi     2%       1  4.9M    0%   /System/Volumes/xarts
+/dev/disk1s1     500Mi   5.8Mi   483Mi     2%      35  4.9M    0%   /System/Volumes/iSCPreboot
+/dev/disk1s3     500Mi   604Ki   483Mi     1%      76  4.9M    0%   /System/Volumes/Hardware
+/dev/disk3s5     228Gi   119Gi    90Gi    58%    906k  939M    0%   /System/Volumes/Data
+map auto_home      0Bi     0Bi     0Bi   100%       0     0     -   /System/Volumes/Data/home
+
+NOTE: The internal SSD is soldered — capacity cannot be expanded internally.
+      Use external Thunderbolt/USB storage for bulk data.
+
+=== Network ===
+Ethernet:
+BSD Device Name: en0
+Configuration Method: DHCP
+Configuration Method: Automatic
+MAC Address: d0:11:e5:b6:07:f8
+Media Subtype: none
+Ethernet Adapter (en5):
+BSD Device Name: en5
+Configuration Method: DHCP
+Configuration Method: Automatic
+MAC Address: 96:82:94:38:19:f3
+Media Subtype: none
+Ethernet Adapter (en6):
+BSD Device Name: en6
+Configuration Method: DHCP
+Configuration Method: Automatic
+MAC Address: 96:82:94:38:19:f4
+Media Subtype: none
+Ethernet Adapter (en7):
+BSD Device Name: en7
+Configuration Method: DHCP
+Configuration Method: Automatic
+MAC Address: 96:82:94:38:19:f6
+Media Subtype: none
+USB 10/100/1000 LAN:
+BSD Device Name: en8
+Configuration Method: DHCP
+Configuration Method: Automatic
+Thunderbolt Bridge:
+BSD Device Name: bridge0
+Configuration Method: DHCP
+Configuration Method: Automatic
+Wi-Fi:
+BSD Device Name: en1
+Configuration Method: DHCP
+Configuration Method: Automatic
+MAC Address: d0:11:e5:bd:8e:44
+Media Subtype: Auto Select
+
+=== Active IPv4 Addresses ===
+  en1      192.168.50.248
+
+=== Default Route ===
+Routing tables
+
+Internet:
+Destination        Gateway            Flags               Netif Expire
+default            192.168.50.1       UGScg                 en1       
+
+=== OS ===
+ProductName:    macOS
+ProductVersion: 15.2
+BuildVersion:   24C101
+
+=== Kernel ===
+Darwin unknownue-servers-Mac-mini.local 24.2.0 Darwin Kernel Version 24.2.0: Fri Dec  6 19:04:03 PST 2024; root:xnu-11215.61.5~2/RELEASE_ARM64_T8132 arm64

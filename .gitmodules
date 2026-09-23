@@ -4,9 +4,6 @@
 [submodule "submodules/aiperf"]
 	path = submodules/aiperf
 	url = https://github.com/ai-dynamo/aiperf.git
-[submodule "submodules/Claude-Code-Game-Studios"]
-	path = submodules/Claude-Code-Game-Studios
-	url = https://github.com/Donchitos/Claude-Code-Game-Studios
 [submodule "submodules/rtx6kpro"]
 	path = submodules/rtx6kpro
 	url = https://github.com/local-inference-lab/rtx6kpro.git
@@ -25,3 +22,6 @@
 [submodule "submodules/deepseek-v4.1-flash-4x-rtx-pro-6000"]
 	path = submodules/deepseek-v4.1-flash-4x-rtx-pro-6000
 	url = https://github.com/0xSero/deepseek-v4.1-flash-4x-rtx-pro-6000.git
+[submodule "submodules/multica"]
+	path = submodules/multica
+	url = https://github.com/multica-ai/multica.git

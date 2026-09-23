@@ -63,7 +63,7 @@ Reference: [Level1Techs P2P NCCL Fix](https://forum.level1techs.com/t/dual-rtx-p
 
 ## Roles
 
-- `compute` — runs AI training workloads via Docker + NVIDIA Container Toolkit
+- `compute` — runs GPU inference/training workloads via Docker + NVIDIA Container Toolkit
 - `display-mixed` — heterogeneous GPU setup (compute + display)
 
 ## Related Projects

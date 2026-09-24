@@ -1,0 +1,37 @@
+=== CPU ===
+Model name:            AMD Ryzen 7 9800X3D 8-Core Processor           
+Cores / Threads:       8 / 8
+Max clock:             4700 MHz
+Socket:                AM5
+
+=== RAM ===
+Total physical:        31.1 GiB
+Free physical:         20.1 GiB
+DIMM DIMM 1: 16 GB 6000 MT/s Unknown KCYU56016H08C                 
+DIMM DIMM 1: 16 GB 6000 MT/s Unknown KCYU56016H08C                 
+
+=== Motherboard ===
+Board:                 Gigabyte Technology Co., Ltd. B850I AORUS PRO
+BIOS:                  FA8 (02/05/2026 08:00:00)
+System:                Gigabyte Technology Co., Ltd. B850I AORUS PRO
+
+=== GPU Devices ===
+GameViewer Virtual Display Adapter  [driver 15.6.5.199, 0 GB reported]
+AMD Radeon(TM) Graphics  [driver 32.0.21025.10016, 0 GB reported]
+NVIDIA GeForce RTX 4090  [driver 32.0.15.9186, 4 GB reported]
+
+=== NVIDIA GPU Details ===
+index, name, pci.bus_id, driver_version, memory.total [MiB]
+0, NVIDIA GeForce RTX 4090, 00000000:01:00.0, 591.86, 24564 MiB
+
+=== Storage ===
+\\.\PHYSICALDRIVE0  954 GB  Predator SSD GM7 1TB  [Fixed hard disk media]
+Volume C:  200 GB total, 104 GB free  Win 11 Pro x64  [NTFS]
+Volume D:  754 GB total, 354 GB free    [NTFS]
+
+=== OS ===
+Name:                  Microsoft Windows 11 Pro
+Version:               10.0.22631 (build 22631)
+Install date:          08/11/2026 17:13:24
+Hostname:              SK-20260811BZVK
+PowerShell:            5.1.22621.6133

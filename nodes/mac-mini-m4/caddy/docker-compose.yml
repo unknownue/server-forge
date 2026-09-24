@@ -1,0 +1,60 @@
+# Caddy reverse proxy — mac-mini-m4
+#
+# A standalone stack, independent of ../multica. It joins the multica-net
+# network as an external network so it can reach the backend and frontend by
+# container name, and so the two stacks can be started and stopped separately.
+#
+# multica-net is created by ../multica/docker-compose.yml. deploy.sh checks for
+# it and tells you to start that stack first if it is missing.
+
+name: caddy
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    ports:
+      # The only LAN-facing listener on this node. Everything else binds to
+      # host loopback: Docker Desktop bypasses the macOS firewall, so a
+      # published port is reachable from the whole subnet regardless of any
+      # host firewall setting. Publishing only the proxy keeps a single,
+      # auditable entry point.
+      - "3000:3000"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - multica-net
+    environment:
+      # Docker Desktop injects the HOST's http_proxy/https_proxy into every
+      # container (derived from the macOS system proxy settings — here a local
+      # Clash-style proxy on host.docker.internal:7897). Caddy honours those
+      # variables for its OWN upstream connections by default, so every
+      # reverse_proxy dial was being sent to the host proxy, which cannot
+      # resolve Docker-internal names like `multica-backend` and answered 502.
+      # The symptom is a proxy that starts cleanly, validates its config, and
+      # 502s every request.
+      #
+      # Emptying the uppercase and lowercase forms plus widening NO_PROXY to
+      # `*` neutralises that. It is correct here because this proxy only ever
+      # talks to containers on multica-net; it needs no egress, and Caddy
+      # fetches no ACME certificates while the site is HTTP-only.
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
+    restart: unless-stopped
+
+volumes:
+  # Holds certificates and OCSP staples. Unused while this proxy is HTTP-only,
+  # but kept so that enabling TLS later does not invalidate anything.
+  caddy_data:
+  caddy_config:
+
+networks:
+  multica-net:
+    external: true
+    name: multica-net

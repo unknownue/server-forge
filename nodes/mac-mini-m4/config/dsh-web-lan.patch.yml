@@ -1,0 +1,72 @@
+# dsh Web profile patch layer — mac-mini-m4
+#
+# Applied after every bundle layer, to BOTH `dsh web` and `dsh --profile web`,
+# with no extra flags. This is the permanent LAN-mode setting for this machine:
+# the GUI binds all interfaces on every start, so no launcher wrapper is needed.
+#
+# Tracked in server-forge and applied to ~/.dsh/profiles/web/cordis.patch.yml by
+# install.sh next to this file. Edit it HERE, never in ~/.dsh.
+#
+# ── Row 1: hmr ──────────────────────────────────────────────────────────────
+# Shipped default from the dsh-base layer, restated so this file is a complete
+# description of the profile's user layer rather than a partial diff.
+
+- id: hmr
+  disabled: false
+  config:
+    root: []
+
+# ── Row 2: webserver — bind the LAN ─────────────────────────────────────────
+#
+# Why this is needed at all:
+#   The web CLI hard-refuses `--host 0.0.0.0` — see dsh-web-app/lib/startup.js:
+#
+#     if (options.host === "0.0.0.0") program.error(
+#       "error: --host 0.0.0.0 is intentionally not supported yet for safety: ...")
+#
+#   That guard lives ONLY in the flag parser. `dsh-host-webserver`'s own schema
+#   accepts `0.0.0.0`, so overriding the composed row here reaches the same
+#   configuration without ever passing through the parser.
+#
+# Why the profile layer rather than `--patch` on the command line:
+#   The profile user layer is composed on every boot of the web profile, so the
+#   bind is a property of the machine's dsh installation rather than of one
+#   invocation. `dsh web` with no flags is then already LAN-reachable.
+#
+# The profile layer WINS over the CLI flag (verified: `dsh web --host
+# 127.0.0.1` still binds `*`), which is the desired precedence — the machine's
+# committed posture cannot be silently downgraded by a stray flag.
+#
+# Every key the row owns must be restated, because a patch replaces the row's
+# whole config rather than merging into it:
+#   - `host`   — the entire point of this file.
+#   - `port`   — the schema declares it `.required()`; omitting it fails the
+#                boot with "$.port missing required value". Re-derived from the
+#                same webStartup service the shipped bundle reads, so `--port`
+#                stays authoritative and dsh's own default (3080) applies when
+#                no flag is passed. A literal here would pin every launch to
+#                one port.
+#   - `inject` — also replaced by the patch, and required for `ctx.webStartup`
+#                to exist when the `!!js` expression below is evaluated.
+#   - the three compression keys — shipped Web bundle values; dropping them
+#                would silently change response encoding, not just the bind.
+
+- id: webserver
+  inject: [webStartup]
+  config:
+    host: 0.0.0.0
+    port: !!js ctx.webStartup.port ?? 3080
+    compression: gzip
+    compressionLevel: 1
+    compressionThresholdBytes: 1024
+
+# ── Risk posture ────────────────────────────────────────────────────────────
+# Binding 0.0.0.0 exposes the /api endpoint — and the shell tool behind it — to
+# the whole subnet over plain HTTP. The browser token exchange still gates every
+# request (`/` returns 401 without a token; `/api` refuses an untrusted Host
+# with 403), so this is not unauthenticated, but a leaked token is remote code
+# execution as the desktop user. Trusted networks only; never port-forward it.
+#
+# Deliberately NOT proxied through the Caddy container: on Docker Desktop a
+# container cannot reach the host's loopback, so no container-based proxy can
+# front a host process. See ../README.md for the verified details.

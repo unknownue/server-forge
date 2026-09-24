@@ -1,0 +1,78 @@
+# Caddy reverse proxy for Multica — mac-mini-m4
+#
+# Why this exists at all:
+#   Next.js rewrites (inside the multica-frontend container) forward /v1, /api,
+#   /auth and /uploads to the backend, so plain HTTP works without a proxy.
+#   But rewrites only forward HTTP requests — they cannot carry the WebSocket
+#   `Upgrade` handshake. Without a proxy terminating /ws, real-time features
+#   (chat streaming, live issue updates, notifications) silently stop working
+#   on any origin other than the one Next.js was built for.
+#
+# Layout — single origin:
+#   Frontend and backend are served from ONE hostname/port (3000). The browser
+#   therefore calls /api and /ws on the page's own origin, so no cross-host
+#   cookie or CSRF problem can arise. This is the layout upstream recommends,
+#   and it keeps the session cookie host-only.
+#
+# Configuration note:
+#   The site address is a bare port (`:3000`), deliberately NOT
+#   `http://192.168.50.248:3000`. Writing the IP literal makes Caddy compile a
+#   `host` matcher pinned to that exact Host header, so a request arriving as
+#   `localhost:3000` — or with any other Host — falls through to a default
+#   empty 200 instead of reaching these handlers. A bare port serves every
+#   Host and every interface, which is what a single-machine LAN entry point
+#   wants, and it also removes the IP from this file so the proxy no longer
+#   has to be edited when the machine's address changes.
+#
+#   `http://` is kept: without it, Caddy would try to provision a TLS
+#   certificate automatically, which cannot succeed for a bare IP on a LAN,
+#   and that failure would block the site.
+
+http://:3000 {
+	# ── Daemon API (remote agents on the LAN) ───────────────────────────────
+	# The daemon lives on another machine and talks to the BACKEND directly,
+	# never through the Next.js frontend. Two paths matter:
+	#   /api/daemon/*  — claim, heartbeat, prepare-lease, start, complete
+	#   /api/daemon/ws — the persistent WebSocket that carries wake signals
+	#
+	# Without this block those requests would fall through to the frontend
+	# handler, whose Next.js rewrites do not carry the WebSocket upgrade, and
+	# remote agents would register then silently never receive work.
+	#
+	# This is also why the backend itself stays bound to 127.0.0.1: the proxy
+	# is the single LAN entry point, so there is one auditable surface and one
+	# place to add TLS later.
+	@multica_daemon path /api/daemon /api/daemon/*
+	handle @multica_daemon {
+		reverse_proxy multica-backend:8080 {
+			# -1 as well: the daemon's /api/daemon/ws connection is long-lived
+			# and must not sit behind the flush window.
+			flush_interval -1
+		}
+	}
+
+	# ── Browser WebSocket (realtime issue updates) ──────────────────────────
+	# Must be declared before the catch-all below.
+	#
+	# `path /ws /ws/*` rather than `/ws*`: Caddy's `*` has no path-segment
+	# boundary, so `/ws*` would also capture unrelated paths such as `/ws-foo`,
+	# which is a legitimate workspace slug (only the exact slug `ws` is
+	# reserved). A bare `handle /ws` would be exact-match only and miss future
+	# `/ws/...` variants. Listing both covers the real cases without overreach.
+	@multica_ws path /ws /ws/*
+	handle @multica_ws {
+		reverse_proxy multica-backend:8080 {
+			# Disables response buffering so frames are forwarded the moment
+			# they arrive. Without it, frames can sit behind Caddy's default
+			# flush window — which shows up as delayed comments, missing typing
+			# indicators, or "comments only appear after a refresh".
+			flush_interval -1
+		}
+	}
+
+	# Everything else goes to the Next.js frontend, whose own rewrites handle
+	# the /v1, /auth and /uploads paths.
+	handle {
+		reverse_proxy multica-frontend:3000
+	}
+}

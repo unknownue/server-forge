@@ -56,6 +56,10 @@ Full hardware report: [hardware-info.txt](hardware-info.txt)
 - Scoop package manager (git 2.55.0 installed via Scoop)
 - Toolchain: Python 3.14.7, Node v26.7.0 / npm 11.19.0, clang 22.1.8, GNU Make 4.4.1
 - Docker: not installed
+- GitHub access: HTTPS to github.com is blocked on this network; the repo remote
+  uses SSH (`git@github.com:`), authenticated with the machine-specific key
+  `~/.ssh/id_ed25519_windows-4090` (comment `windows-4090`), selected via
+  `~/.ssh/config` `Host github.com`. Added 2026-09-24.
 
 ## Known Quirks
 

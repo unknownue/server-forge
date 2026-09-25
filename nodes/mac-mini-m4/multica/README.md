@@ -182,20 +182,27 @@ docker logs multica-backend 2>&1 | grep "Verification code"
 ```
 ┌──────────────────────────┐        ┌────────────────────────────────┐
 │ mac-mini-m4（本机）       │        │ 开发机（局域网，每台一个）      │
-│  控制平面                 │  LAN   │  multica-agent 容器            │
-│                          │◀───────│   ├── daemon                   │
-│  caddy :3000             │        │   ├── dsh（容器私有 DSH_HOME）  │
-│   ├ /api/daemon/* → backend       │   └── /repos ← 仓库            │
-│   ├ /ws           → backend       │                                │
-│   └ 其余          → frontend      │        │                       │
-│                          │        │        ▼                       │
-│  multica-backend :8080   │        │  本地模型端点（GPU 机器）       │
+│  控制平面                 │  LAN   │  multica daemon                │
+│                          │◀───────│   └── dsh                      │
+│  caddy :3000             │        │        （容器或原生，由该机决定）│
+│   ├ /api/daemon/* → backend       │                                │
+│   ├ /ws           → backend       │        │                       │
+│   └ 其余          → frontend      │        ▼                       │
+│                          │        │  本地模型端点（GPU 机器）       │
+│  multica-backend :8080   │        │                                │
 │  multica-postgres        │        │                                │
 └──────────────────────────┘        └────────────────────────────────┘
 ```
 
-接入方式：**在每台开发机上部署 `../multica-agent/`**。
-完整操作步骤见 `../multica-agent/OPERATIONS.md`。
+**本机不装 dsh，也不配任何模型。** Multica 服务端不调用模型：
+`.env.example` 里的 `MULTICA_LLM_*` 层只用于聊天自动起标题和生成追问建议，
+本部署**刻意留空**（留空是官方支持的配置，此时它发出零个上游请求）。
+真正调用模型的是开发机上的 dsh。
+
+daemon 的安装方式由那台机器自己决定 —— 容器化或原生安装都可以，
+本机只需要保证网络可达（见下节两处配置）。账户对接走
+`multica setup self-host --server-url http://192.168.50.248:3000`，
+或 `multica login --token mul_...`（无浏览器环境）。
 
 ### 服务端为此做的两处配置
 
@@ -229,8 +236,8 @@ curl -s --noproxy '*' -i http://192.168.50.248:3000/api/daemon/runtimes | head -
 # 期望：HTTP/1.1 401 + X-Middleware-Rewrite: http://backend:8080/api/daemon/runtimes
 ```
 
-> **若缺这条规则会怎样**：请求落到前端，daemon 注册后静默失效。
-> `multica-agent/deploy.sh` 会在部署前探测这个端点并在 404 时直接中止。
+> **若缺这条规则会怎样**：请求落到前端（返回 404 或 HTML），daemon 注册后静默失效 ——
+> 界面看起来正常，只是永远没有 runtime 上线。接入开发机前先用上面的 curl 确认这条路由。
 
 ## 运维
 

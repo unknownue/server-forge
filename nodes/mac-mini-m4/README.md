@@ -154,16 +154,6 @@ mac-mini-m4/
 │   ├── docker-compose.yml
 │   ├── deploy.sh
 │   └── stop.sh
-├── multica-agent/       # Agent runtime for the DEVELOPMENT machines (control plane stays here)
-│   ├── README.md
-│   ├── OPERATIONS.md    # step-by-step for each development machine
-│   ├── Dockerfile       # multica CLI + dsh + the vendored DSH runtime bridge
-│   ├── bridge/          # vendored upstream snapshot (not on npm)
-│   ├── docker-compose.yml
-│   ├── .env.example
-│   ├── deploy.sh
-│   ├── stop.sh
-│   └── entrypoint.sh
 └── provision/
     ├── install-packages.sh
     └── collect-hardware-info.sh
@@ -174,9 +164,12 @@ stopped separately; they are peers rather than parent/child because the proxy is
 generic edge component, not part of the Multica stack. They share the Docker
 network `multica-net` (owned by `multica/`, attached as external by `caddy/`).
 
-`multica-agent/` is built and run **on the development machines**, not here. It lives
-under this node because this node owns the Multica deployment and the agent runtime is
-part of that deployment's surface.
+**Agent runtimes are out of scope for this node.** It serves the Multica control
+plane only. Daemons run on the LAN development machines, installed there by
+whatever means fits that machine — this node neither builds nor ships an agent
+image. What this node does owe a remote daemon is reachability, which is why
+`caddy/Caddyfile` forwards `/api/daemon/*` and `.env` sets
+`MULTICA_DAEMON_SERVER_URL`.
 
 ## Services
 
@@ -184,7 +177,6 @@ part of that deployment's surface.
 |:---|:---|:---|
 | Multica (control plane: web, API, database) | http://192.168.50.248:3000 | [multica/README.md](multica/README.md) |
 | Caddy (reverse proxy; LAN entry + daemon API) | http://192.168.50.248:3000 | [caddy/README.md](caddy/README.md) |
-| Multica agent runtime (**runs on other machines**) | — | [multica-agent/OPERATIONS.md](multica-agent/OPERATIONS.md) |
 | DSH Web GUI (permanent LAN mode) | http://192.168.50.248:3080 | [Exposing the DSH Web GUI to the LAN](#exposing-the-dsh-web-gui-to-the-lan) |
 
 Start order matters — the network must exist first:
@@ -409,7 +401,7 @@ Selected casks: `docker-desktop`, `claude-code`, `google-chrome`, `warp`, `zed`,
 | Docker Hub is unreachable from this network | `registry-1.docker.io`'s token endpoint returns `EOF`, so any Docker Hub pull hangs. Configure a mirror with `config/set-docker-mirror.sh` and confirm it took effect via `docker info --format '{{json .RegistryConfig.Mirrors}}'`. Registry mirrors do **not** cover `ghcr.io` — see `multica/README.md`. |
 | Docker Desktop injects host proxy env into containers | Containers inherit `HTTP_PROXY`/`HTTPS_PROXY` from `~/.docker/config.json`'s `proxies.default`. Any container that makes outbound HTTP (Caddy's upstream dials, `curl`, `wget`) routes through it and fails on Docker-internal hostnames with `502`, or on external hosts if the proxy is dead — the container starts cleanly and every request fails. Neutralise per-service in the compose file (see `caddy/docker-compose.yml`) or pass `--noproxy '*'` in test commands. |
 | **Stale `proxies.default` in `~/.docker/config.json` breaks all image builds** | This node had `httpProxy`/`httpsProxy` pointing at `host.docker.internal:7897` with **nothing listening on that port**. Docker Desktop injects those values into `docker build` and `docker run`, so `apt-get update` and `corepack prepare pnpm` failed with `Ign:`/`Unable to connect to host.docker.internal:7897` while the HOST reached the same URLs fine (`deb.debian.org` 200, `registry.npmjs.org` 200). The asymmetry — host works, containers do not — is the signature of this problem. Fix: remove the `proxies` block from `~/.docker/config.json` (a `.bak` is left behind), then verify from inside a container: `docker run --rm node:22-bookworm-slim sh -c 'apt-get update -qq 2>&1 \| grep -c "^W:"'` should print `0`. |
-| `github.com` unreachable, but `api.github.com` works | Measured here: `github.com:443` times out after 75 s while `api.github.com` returns 200, so `git clone` and `curl` of release URLs fail but the REST API works. Workaround for source: fetch a tarball via `https://api.github.com/repos/<owner>/<repo>/tarball/<ref>`. For release assets, set a mirror prefix (see `GH_PROXY` in `multica-agent/.env.example`). |
+| `github.com` unreachable, but `api.github.com` works | Measured here: `github.com:443` times out after 75 s while `api.github.com` returns 200, so `git clone` and `curl` of release URLs fail but the REST API works. Workaround for source: fetch a tarball via `https://api.github.com/repos/<owner>/<repo>/tarball/<ref>`. For a release asset, resolve its id from `api.github.com/repos/<owner>/<repo>/releases/tags/<tag>` and download it with `Accept: application/octet-stream`. Match the asset by **name** — the release JSON lists ~38 assets and `checksums.txt` comes first, so taking the first `url` field downloads a 1 KB text file. |
 | `timeout` is not available | macOS has no GNU `timeout` by default (it is `gtimeout` from coreutils). Use `curl --max-time` instead in scripts. |
 | Restarting Docker Desktop is not instant | After `osascript -e 'quit app "Docker"'`, the engine can take minutes to accept connections again, and one restart may not fully bring the VM up. Wait on `docker info` in a loop rather than assuming readiness; containers with `restart: unless-stopped` come back on their own. |
 
@@ -419,7 +411,8 @@ Selected casks: `docker-desktop`, `claude-code`, `google-chrome`, `warp`, `zed`,
 |:---|:---|:---|
 | 2026-05-24 | Node initialization | Created `nodes/mac-mini-m4/` using `unknownue-manjaro` as template. Added macOS-native `collect-hardware-info.sh` (shared collector is Linux-only), generated `hardware-info.txt`, wrote this README, and registered the node in `inventory/hosts.yml`. |
 | 2026-05-24 | Deployed Multica (self-hosted AI agent workspace) | New peer services `multica/` and `caddy/` under this node. Compose stack derived from upstream as an independent copy (no submodule dependency); Caddy containerised as the single LAN entry point on port 3000, forwarding `/ws` to the backend for WebSocket support. Added `config/set-docker-mirror.sh` because Docker Hub is unreachable here, plus a GHCR prefix-rewrite pull for the Multica images. Verified: `/readyz` reports `db`/`migrations` ok, LAN entry returns the frontend and backend responses, `/ws` reaches the backend. |
-| 2026-05-24 | Multica pointed at a remote-agent topology | This host serves only the Multica **server**; agents run on the LAN development machines. Set `MULTICA_DAEMON_SERVER_URL` explicitly, because the backend's fallback chain would otherwise advertise the frontend origin to daemons that speak `/api/daemon/*` to the Go backend. Added a `/api/daemon` block to `caddy/Caddyfile` so remote daemons reach the backend through the single LAN entry point rather than needing the loopback-bound 8080. Added `multica-agent/` — a containerised daemon + dsh runtime for the development machines, isolating the container's DSH home from the host's own `~/.dsh`. |
+| 2026-05-24 | Multica pointed at a remote-agent topology | This host serves only the Multica **server**; agents run on the LAN development machines. Set `MULTICA_DAEMON_SERVER_URL` explicitly, because the backend's fallback chain would otherwise advertise the frontend origin to daemons that speak `/api/daemon/*` to the Go backend. Added a `/api/daemon` block to `caddy/Caddyfile` so remote daemons reach the backend through the single LAN entry point rather than needing the loopback-bound 8080. |
+| 2026-05-24 | Removed the agent-runtime build from this node | A containerised daemon + dsh image (`multica-agent/`) was built here and then dropped: this node is the control plane, and how a development machine installs its daemon is that machine's business. Removing it also reclaimed a 1.6 GB image and ~5.4 GB of build cache. The network requirements a remote daemon depends on — `MULTICA_DAEMON_SERVER_URL` and Caddy's `/api/daemon/*` route — are unaffected and remain in place. |
 | 2026-05-24 | Fixed broken container networking | `~/.docker/config.json` carried a `proxies.default` block pointing at `host.docker.internal:7897` with nothing listening there. Docker Desktop injected it into every build and run, so `apt-get update` and `corepack prepare pnpm` failed inside containers while the host reached the same URLs fine. Removed the block (backup kept as `~/.docker/config.json.bak.*`); container builds now reach `deb.debian.org` and `registry.npmjs.org` directly. |
 | 2026-05-25 | `Iterator is not defined` in the LAN Web GUI | The document-preview plugin failed to import for clients on browsers lacking the `Iterator` global (Safari < 18.4, Chrome < 122, Firefox < 131). Root cause is a pdf.js 6.3.289 defect — an unguarded `typeof Iterator.prototype.join` probe, which throws `ReferenceError` because the property read precedes `typeof` — still unfixed in pdf.js master. Added `config/patch-documentpreview-iterator.sh`, which guards both copies of the probe (module body + embedded worker source), verifies the file still parses, and restores its backup on any failure. Confirmed the original statement throws the exact reported error in an engine without the global while the patched one does not, and that the polyfill still installs when `Iterator` exists but `join` does not. Not LAN-specific — the same browser fails identically over loopback. |
 | 2026-05-25 | Exposed the DSH Web GUI to the LAN | `dsh web` bound loopback-only and the CLI hard-refuses `--host 0.0.0.0`, but that guard is only in the flag parser while `dsh-host-webserver` already accepts `0.0.0.0`. Added `config/dsh-web-lan.patch.yml` (a dsh profile patch overriding the composed `webserver` row) plus `config/install-dsh-lan.sh`, which installs it into `~/.dsh/profiles/web/cordis.patch.yml` and validates it through the real composer. A plain `dsh web` now binds `0.0.0.0` with no flags or wrapper. Verified from the LAN IP: `/` → `401` without a token, token exchange → `303` + cookie, authenticated page → `200` (27 KB, `<title>DeepSeek Harness</title>`); `/api` passes for the LAN authority (`401`, needs auth) and returns `403` for an untrusted `Host`. The community plugins `dsh-lan-access` / `@yueker/dsh-lan-access` were evaluated first and rejected: their `crypto.randomUUID` fix is already upstream in this build (`@deepseek-ai/dsh-util-crypto` mints UUIDs from `getRandomValues`, and all four `crypto.randomUUID` references in the served bundle are feature-guarded), and the privileged-API restriction they also patch does not exist here. Caddy was also evaluated and rejected — on Docker Desktop neither `host.docker.internal` nor `network_mode: host` reaches the host's loopback, so no container-based proxy can front it. |

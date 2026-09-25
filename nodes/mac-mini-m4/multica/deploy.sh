@@ -223,8 +223,7 @@ Next steps:
   1. Start the reverse proxy (required for LAN + daemon API + WebSocket):
        bash ${SCRIPT_DIR}/../caddy/deploy.sh
   2. Log in — see README.md ("First login")
-  3. Connect an agent runtime. This host is the control plane only: the daemon
-     runs on the DEVELOPMENT machines, containerised, from:
-       ${SCRIPT_DIR}/../multica-agent/
-     Per-machine steps: see multica-agent/OPERATIONS.md
+  3. On each DEVELOPMENT machine, install the multica CLI and point it here:
+       multica setup self-host --server-url $(env_val MULTICA_DAEMON_SERVER_URL)
+     This host runs no daemon by design; see README.md ("拓扑").
 EOF

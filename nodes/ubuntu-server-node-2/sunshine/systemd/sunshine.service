@@ -1,0 +1,87 @@
+[Unit]
+Description=Self-hosted game stream host for Moonlight
+Documentation=file:%h/Workspace/server-forge/nodes/ubuntu-server-node-2/README.md
+
+# Boot autostart on a headless host.
+#
+# The packaged Debian unit (app-dev.lizardbyte.app.Sunshine.service) anchors at
+# `WantedBy=graphical-session.target`. That target is only ever reached by a
+# *desktop login* (gnome-session@ubuntu.target -> gnome-session.target ->
+# BindsTo=graphical-session.target). Linger alone starts user@1000.service but
+# reaches only default.target, so with the packaged unit Sunshine silently never
+# started after a reboot until somebody logged in at the console — it looked
+# enabled and healthy the whole time. That is why this repo owns the unit,
+# anchored at default.target instead.
+#
+# TRAP — do NOT "helpfully" add `Wants=graphical-session.target` here (this unit
+# used to carry it; it broke console login, see the Maintenance Log for
+# 2026-09-26). Sunshine only ever needs ORDERING against a session that happens
+# to come up in the same transaction, never a pull. On a lingering user manager
+# the pull is fatal: graphical-session.target is empty, so a Wants= job activates
+# it at once during boot and it is left ACTIVE with no session behind it. GNOME
+# 50's gnome-session-init-worker then finds the target already active at the next
+# console login and aborts with "A graphical session is already running!" before
+# the session registers with GDM — GDM logs "GdmDisplay: Session never
+# registered, failing" and silently resets to the greeter, so a CORRECT password
+# flashes back to the login screen while a wrong one still shows the normal
+# error. After= alone is safe: ordering without a pull, so with the target
+# inactive at boot Sunshine is not delayed at all, and when a real session starts
+# later it is gnome-session that activates the target.
+After=graphical-session.target
+
+[Service]
+# Wait for the target GPU's DRM node before starting. Sunshine probes /dev/dri
+# ONCE at startup and, if it is absent, disables kmsgrab for the life of the
+# process — it does not retry:
+#     Warning: Couldn't find /dev/dri, kmsgrab won't be enabled
+#     Error: Unable to initialize capture method
+#     Fatal: Unable to find display or encoder during startup.
+# At boot this is a real race, observed on this node: systemd started the unit at
+# 19:12:37, Sunshine probed at 19:12:38 and found no /dev/dri, and card1 (the
+# dummy-plug GPU, 0000:08:00.0) only finished DRM init at 19:12:39 — one second
+# too late. The service still went `active` and served the Web UI while being
+# unable to capture anything, so the only symptom was a stream that would not
+# start. A manual `systemctl --user restart` always "fixed" it, which is what
+# makes this easy to misread as a flaky GPU rather than a startup race.
+#
+# Do NOT try to solve this with a device-unit dependency
+# (`Requires=`/`After=dev-dri-renderD129.device`): device units are not
+# activated by the *user* manager here, so that dependency never becomes
+# satisfied and the start job hangs forever (verified — it blocked until
+# cancelled). A bounded wait for the node is the reliable mechanism.
+#
+# Bounded (not indefinite) on purpose: if the node never appears, starting
+# Sunshine anyway is strictly better than hanging, because the failure is then
+# visible in the journal instead of as a wedged start job. 60s comfortably
+# covers the ~13s this hardware needs while staying far below the start timeout.
+ExecStartPre=/bin/bash -c 'for i in {1..60}; do [ -e /dev/dri/renderD129 ] && exit 0; sleep 1; done; echo "WARNING: /dev/dri/renderD129 not present after 60s; starting anyway" >&2; exit 0'
+
+ExecStart=/usr/bin/sunshine
+
+Restart=on-failure
+RestartSec=5s
+
+# NOTE: no NoNewPrivileges=true and no CapabilityBoundingSet here, deliberately.
+# /usr/bin/sunshine ships with a FILE capability, `cap_sys_admin=p`:
+#     $ getcap /usr/bin/sunshine
+#     /usr/bin/sunshine cap_sys_admin=p
+# kmsgrab must read the DRM framebuffer, which requires CAP_SYS_ADMIN. Adding
+# NoNewPrivileges=true — correct and harmless for the Service Hub unit, where it
+# was copied from — makes the kernel ignore file capabilities, so Sunshine logs
+# `Error: Failed to gain CAP_SYS_ADMIN`, then `Unable to initialize capture
+# method`, and finally fails *every* encoder in the probe sweep with
+# `Fatal: Unable to find display or encoder during startup`. The service still
+# looks active and serves the Web UI, so this fails quietly. Leave it off.
+
+[Install]
+WantedBy=default.target
+
+# NOTE on rate limiting: StartLimitIntervalSec/StartLimitBurst belong in [Unit],
+# not [Service] — systemd ignores them in [Service] and silently keeps the
+# default (5 starts / 10s). Not set here because the defaults are fine for a
+# service that should simply stay up or fail loudly.
+#
+# NOTE on network ordering: `After=network-online.target` is deliberately NOT
+# declared. network-online.target is not defined in the *user* manager
+# (LoadState=not-found), so ordering against it is a no-op that only looks like
+# a guarantee. Sunshine binds 0.0.0.0 and tolerates the network arriving later.

@@ -47,6 +47,96 @@ else
     echo "         fix: sudo loginctl enable-linger $USER"
 fi
 
+# Boot autostart is decided by TWO things, and `is-active` proves neither: a
+# service hand-started now can still be dead after a reboot. Check the enable
+# symlink points at default.target (reached at boot by the lingering manager)
+# rather than graphical-session.target (only reached by a desktop login), and
+# that linger is on so the user manager runs at all.
+boot_anchor=$(systemctl --user show "$UNIT" -p WantedBy --value 2>/dev/null)
+if [[ -L "$HOME/.config/systemd/user/default.target.wants/$UNIT" ]]; then
+    pass "autostart: enabled under default.target (starts at boot, no login needed)"
+elif [[ "$boot_anchor" == *graphical-session.target* ]]; then
+    fail "autostart: enabled under graphical-session.target — only starts on a DESKTOP LOGIN"
+    echo "         This is the packaged unit's layout. With nobody logged in it"
+    echo "         never starts, while still reporting 'enabled'."
+    echo "         fix: bash $(dirname "${BASH_SOURCE[0]}")/install.sh"
+elif [[ -z "$boot_anchor" ]]; then
+    fail "autostart: not enabled — will not start after a reboot"
+    echo "         fix: systemctl --user enable $UNIT"
+else
+    warn "autostart: enabled under '$boot_anchor' — verify that target is reached at boot"
+fi
+
+if [[ "$linger" == "yes" && -L "$HOME/.config/systemd/user/default.target.wants/$UNIT" ]]; then
+    pass "boot path complete: linger + default.target.wants = starts unattended"
+fi
+
+# Wants=graphical-session.target must NOT be present. On a lingering manager the
+# target is empty and its Wants= job runs at boot, leaving it active with no
+# session behind it; the next console login then aborts with "A graphical session
+# is already running!" before registering with GDM, so a CORRECT password bounces
+# back to the greeter. Nothing about the stream would ever reveal this, which is
+# exactly why it gets its own check.
+svc_wants=$(systemctl --user show "$UNIT" -p Wants --value 2>/dev/null)
+if [[ "$svc_wants" == *graphical-session.target* ]]; then
+    fail "$UNIT has Wants=graphical-session.target — this BREAKS CONSOLE LOGIN"
+    echo "         It activates the empty target at boot, so the next login dies"
+    echo "         with 'A graphical session is already running!' and GDM resets"
+    echo "         to the greeter (a correct password appears to be rejected)."
+    echo "         fix: remove the Wants= line, keep After=, then:"
+    echo "                systemctl --user daemon-reload && systemctl --user restart $UNIT"
+    echo "         confirm with: journalctl -b | grep 'graphical session is already running'"
+else
+    pass "no Wants=graphical-session.target (login cannot be poisoned)"
+fi
+
+# kmsgrab needs CAP_SYS_ADMIN, which the package grants as a FILE capability on
+# the binary. That only works if nothing blocks it: NoNewPrivileges=true (or a
+# CapabilityBoundingSet without sys_admin) silently strips it, and Sunshine then
+# fails EVERY encoder while still serving the Web UI — i.e. it looks healthy.
+hr "Capture privilege (kmsgrab needs CAP_SYS_ADMIN)"
+bin=$(command -v sunshine)
+filecap=$(getcap "$bin" 2>/dev/null || true)
+if [[ "$filecap" == *cap_sys_admin* ]]; then
+    pass "file capability present: $filecap"
+else
+    warn "no cap_sys_admin file capability on $bin"
+    echo "         fix: sudo setcap cap_sys_admin=p $bin"
+fi
+
+svc_nnp=$(systemctl --user show "$UNIT" -p NoNewPrivileges --value 2>/dev/null)
+if [[ "$svc_nnp" == "yes" ]]; then
+    fail "NoNewPrivileges=yes on $UNIT — this BLOCKS the file capability above"
+    echo "         Sunshine will log 'Failed to gain CAP_SYS_ADMIN', fail every"
+    echo "         encoder, and still serve the Web UI. Remove that setting."
+else
+    pass "NoNewPrivileges not set (file capability can take effect)"
+fi
+
+if systemctl --user is-active --quiet "$UNIT"; then
+    pid=$(systemctl --user show -p MainPID --value "$UNIT")
+    if journalctl --user -u "$UNIT" _PID="$pid" --no-pager 2>/dev/null | grep -q "Failed to gain CAP_SYS_ADMIN"; then
+        fail "running instance logged 'Failed to gain CAP_SYS_ADMIN'"
+        echo "         fix: restart after clearing NoNewPrivileges/capability issues"
+    else
+        pass "running instance has not logged a CAP_SYS_ADMIN failure"
+    fi
+
+    # The startup race: Sunshine probes /dev/dri exactly once and permanently
+    # disables kmsgrab if it is missing, which at boot happens when the service
+    # wins the race against the amdgpu driver. The service still goes active and
+    # serves the Web UI, so this is the only place the symptom surfaces.
+    if journalctl --user -u "$UNIT" _PID="$pid" --no-pager 2>/dev/null | grep -q "Couldn't find /dev/dri"; then
+        fail "running instance found no /dev/dri at startup — kmsgrab disabled for this process"
+        echo "         It probed before the GPU driver was ready and does not retry."
+        echo "         fix: systemctl --user restart $UNIT   (works once DRM is up)"
+        echo "         permanent fix: the unit's ExecStartPre waits for the DRM node;"
+        echo "         if this recurs, that wait is missing from the installed unit."
+    else
+        pass "no '/dev/dri' startup race in this instance"
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 hr "Configuration"
 if [[ -f "$CONF" ]]; then

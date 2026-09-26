@@ -524,6 +524,7 @@ monitor attached and nobody logged in.
 ```bash
 bash nodes/ubuntu-server-node-2/sunshine/install.sh          # apply config + enable service
 bash nodes/ubuntu-server-node-2/sunshine/sunshine-status.sh  # diagnose (read-only, no root)
+bash nodes/ubuntu-server-node-2/sunshine/sunshine-boot-check.sh  # did it start at boot?
 bash nodes/ubuntu-server-node-2/sunshine/install.sh --remove # uninstall
 ```
 
@@ -648,6 +649,17 @@ So streaming does not depend on a logged-in session, a compositor, or the
 physical monitor — the point of the dummy plug. It also survives a service
 restart and re-establishes capture on its own.
 
+> **Precision on "KMS, not the portal".** This build still *contacts*
+> `xdg-desktop-portal` during startup — you will see
+> `[portalgrab] Loaded portal restore token from disk`, and with no compositor
+> present also `[portalgrab] RemoteDesktop Start: no streams in response` /
+> `Failed to connect to portal. Cannot enumerate displays`. Those lines are
+> **expected on a headless boot and are not the failure signal**: enumeration via
+> the portal returns nothing, then Sunshine falls through to kmsgrab and maps the
+> configured connector from the DRM device. Judge the backend by the KMS success
+> lines above, not by the portal warnings. The genuine failure looks different —
+> see the `NoNewPrivileges` pitfall under "Service model".
+
 This replaces the earlier interim setup that captured card0's physical monitor,
 which stopped working whenever that monitor was powered off or its CRTC was torn
 down. card0 remains a valid fallback (`output_name = HDMI-A-1`,
@@ -728,11 +740,102 @@ defines the available modes.
 ### Service model
 
 Runs as a `systemd --user` unit (`~/.config/systemd/user/sunshine.service`),
-enabled and active. `Linger=yes` is already set on this account, so it survives
-logout — without lingering a user service stops at logout, which would defeat
-the point of a headless stream host. Needs no root: the account is already in
-`render`, `video` and `input`, covering `/dev/dri/*` and gamepad injection via
-`uhid` (loaded; `uinput` is built into the kernel).
+enabled and active. Needs no root: the account is in `render`, `video` and
+`input`, covering `/dev/dri/*` and gamepad injection via `uhid` (loaded;
+`uinput` is built into the kernel).
+
+**The unit is owned by this repo (`sunshine/systemd/sunshine.service`), not
+copied from the package.** That is deliberate — the packaged unit
+(`/usr/lib/systemd/user/app-dev.lizardbyte.app.Sunshine.service`) is written for
+a desktop and does **not** give boot autostart here. See the pitfall below.
+
+Two properties matter for unattended startup, and `systemctl --user is-active`
+proves neither:
+
+| Property | Value | Why |
+|:---|:---|:---|
+| `WantedBy` | `default.target` | Reached at boot by the lingering user manager, with **no login** |
+| `Linger` | `yes` (`/var/lib/systemd/linger/unknownue`) | Without it `user@1000.service` never runs at boot at all |
+
+Only `After=graphical-session.target` is set — **ordering, with no pull**. There is
+deliberately no `Wants=graphical-session.target`; see the login pitfall below for
+why that one word is dangerous here.
+
+> **Verification status: confirmed at a real boot.** The machine rebooted at
+> 2026-09-26 19:12:26 and Sunshine came up at **19:12:37, 11 seconds after boot**,
+> pulled in by the boot transaction itself rather than by a login — the definitive
+> test, since a login-triggered start lands at or after `graphical-session.target`
+> instead. Run `sunshine-boot-check.sh` to re-confirm after any future reboot; it
+> reads the **first** start of the current boot, so a later manual restart cannot
+> mask a failure.
+
+#### Pitfall: `Wants=graphical-session.target` locks you out of the desktop
+
+**This one is worse than a broken stream host: it breaks console login on a
+correct password.** The unit carried `Wants=graphical-session.target` briefly, and
+it was removed after it did exactly that.
+
+On a lingering user manager, `graphical-session.target` is *empty* and its job
+runs at **boot**, when no session exists. `Wants=` starts it there, so it is left
+**active with no session behind it**. At the next console login, GNOME 50's
+`gnome-session-init-worker` checks whether a graphical session is already running,
+sees the active target, and aborts:
+
+```
+gnome-session-i[…]: A graphical session is already running!
+gdm3[…]: Gdm: GdmDisplay: Session never registered, failing
+```
+
+GDM then silently resets to the greeter. The tell-tale symptom is that a **correct
+password flashes back to the login screen while a wrong one still shows the normal
+error** — which reads like an authentication or PAM problem and sends you hunting
+in entirely the wrong place.
+
+`After=` alone is correct and is all Sunshine ever needed:
+
+| Setting | Effect here |
+|:---|:---|
+| `After=graphical-session.target` | Ordering only. With the target inactive at boot nothing is delayed; when a real session starts, **gnome-session** activates the target, not Sunshine. |
+| `Wants=graphical-session.target` | A **pull**. Activates the empty target at boot, poisoning it for the next real login. |
+
+The general rule: a user service on a lingering manager must not pull in targets
+that a session manager is supposed to own — only order against them. Diagnose the
+lockout with:
+
+```bash
+journalctl -b --no-pager | grep -E "graphical session is already running|Session never registered"
+systemctl --user is-active graphical-session.target   # 'active' while you sit at the greeter = poisoned
+```
+
+#### Pitfall: `WantedBy=graphical-session.target` silently blocks boot autostart
+
+The packaged unit is `WantedBy=graphical-session.target`. In GNOME that target is
+only reached by a **desktop login** (`gnome-session@ubuntu.target` →
+`gnome-session.target` → `BindsTo=graphical-session.target`). Lingering alone
+starts `user@1000.service` but reaches only `default.target`, so Sunshine never
+started after a reboot until someone logged in at the console — while still
+reporting `enabled`, and starting fine whenever it was started by hand. Detect it
+with `sunshine-status.sh`, which checks the enable symlink's target rather than
+trusting `is-active`.
+
+#### Pitfall: `NoNewPrivileges=true` breaks *every* encoder
+
+`/usr/bin/sunshine` ships a **file capability** — `getcap /usr/bin/sunshine` →
+`cap_sys_admin=p` — and kmsgrab needs `CAP_SYS_ADMIN` to read the DRM
+framebuffer. `NoNewPrivileges=true` (or a `CapabilityBoundingSet` without
+`sys_admin`) makes the kernel ignore file capabilities, so Sunshine logs
+`Error: Failed to gain CAP_SYS_ADMIN`, then `Unable to initialize capture
+method`, then fails **every** encoder in the sweep:
+
+```
+Fatal: Unable to find display or encoder during startup.
+```
+
+The service still goes `active` and serves the Web UI, so the failure is quiet —
+a hand-started service looked fine while the unit was broken. This setting is
+correct in the Service Hub unit but must stay off here. `sunshine-status.sh`
+checks all three links in the chain: the file capability, the unit property, and
+whether the running instance actually logged the error.
 
 ## Service Hub (web UI)
 
@@ -832,7 +935,9 @@ ubuntu-server-node-2/
 ├── sunshine/            # Moonlight host: headless KMS capture on card1
 │   ├── sunshine.conf              # Config (KMS, encoder, display device)
 │   ├── install.sh                 # Apply config + enable user service
-│   └── sunshine-status.sh         # Read-only diagnostic (no root)
+│   ├── systemd/sunshine.service   # Repo-owned unit (boot autostart, headless)
+│   ├── sunshine-status.sh         # Read-only diagnostic (no root)
+│   └── sunshine-boot-check.sh     # Proves it started at boot, not by hand
 └── bench/               # Performance tests / platform probes
     ├── check-p2p-hip.sh           # GPU P2P probe (HIP only)  ← run first
     ├── check-p2p.sh               # Same, PyTorch-based variant
@@ -858,6 +963,13 @@ ROCm images.
 
 | Date | Issue / Action | Resolution |
 |:---|:---|:---|
+| 2026-09-26 | **Sunshine did not start at boot — `enabled` was a lie** | Symptom: after a reboot the stream host stayed down until someone logged into GNOME, despite `systemctl --user is-enabled sunshine` reporting `enabled`. Cause: the unit was the packaged one, `WantedBy=graphical-session.target`, and that target is only reachable via a desktop login (`gnome-session@ubuntu.target` → `gnome-session.target` → `BindsTo=graphical-session.target`). Lingering started `user@1000.service` at boot but reached only `default.target`, so nothing pulled Sunshine in. Confirmed from the journal: the current boot began 14:38:50, `graphical-session.target` was reached 14:39:20 (a login), and Sunshine only started 14:51:20 — a hand start. In the *previous* boot, with no login, it never started at all. Fix: the repo now owns `sunshine/systemd/sunshine.service` anchored on `WantedBy=default.target` (with `After=graphical-session.target` only — the `Wants=` that briefly accompanied it caused a login lockout, see the entry below). `install.sh` installs that file instead of copying the package's, and removes the stale `graphical-session.target.wants` symlink. Since confirmed at a real reboot — see the "Boot autostart confirmed at a real reboot" entry below. |
+| 2026-09-26 | Nearly shipped the boot fix with capture silently dead — `NoNewPrivileges` vs a file capability | Adding `NoNewPrivileges=true` to the new unit (harmless, and copied from the Service Hub unit where it is correct) stripped `CAP_SYS_ADMIN` that `/usr/bin/sunshine` gets from its **file capability** (`getcap` → `cap_sys_admin=p`). kmsgrab needs it to read the DRM framebuffer, so Sunshine logged `Failed to gain CAP_SYS_ADMIN` → `Unable to initialize capture method` → failed **every** encoder → `Fatal: Unable to find display or encoder during startup`. It still reported `active` and served the Web UI. Caught only by reading the journal rather than trusting `is-active`, since the unit was otherwise correct and the boot-autostart goal was already met. Also worth recording: the `[portalgrab] ... no streams in response` line seen while debugging was a *symptom* of this, not an ordering problem — with the capability restored, KMS resolves `DP-4` normally. `NoNewPrivileges` and `CapabilityBoundingSet` must stay off this unit. |
+| 2026-09-26 | **`Wants=graphical-session.target` broke console login — fixed by the user** | The most damaging change I made, and the one worth remembering. The new unit carried `Wants=graphical-session.target` (reasoning: pull the session in so Sunshine starts after the compositor). On a lingering user manager that target is empty and its `Wants=` job ran at **boot**, leaving it *active with no session behind it*. At the next console login, `gnome-session-init-worker` saw an active graphical session and aborted — `A graphical session is already running!`, then GDM `GdmDisplay: Session never registered, failing`, resetting to the greeter. Effect: **a correct password flashed back to the login screen while a wrong one showed the normal error**, which reads like a PAM/auth fault and misdirects diagnosis entirely. The user removed `Wants=`, keeping only `After=`, and login recovered. Evidence: failure events at 19:17/19:20/19:21/19:25 (7 × `Session never registered`), the fixed unit at 19:45, `graphical-session.target` successfully reached 19:48, and zero occurrences since. Repo unit synced to the user's version and now byte-identical to it. **Rule: a user service on a lingering manager must never pull in targets a session manager owns — order against them (`After=`) only.** Guarded by a `TRAP` comment in the unit and by a new `[FAIL]` check in `sunshine-status.sh`. |
+| 2026-09-26 | Made all three failure modes detectable instead of silent | `sunshine-status.sh` previously checked only `is-active`, which was true during *all* of the bugs above. It now verifies the enable symlink points at `default.target` (naming `graphical-session.target` as the failure when it does not), checks linger *and* the symlink together as the complete boot path, and validates the whole capture-privilege chain: file capability present, `NoNewPrivileges` unset, and the running PID's journal free of `Failed to gain CAP_SYS_ADMIN`. It **also fails if `Wants=graphical-session.target` is present**, since that one word locks the desktop out — a check that exists specifically because no amount of stream testing would ever have caught it. The other two were negative-tested by deliberately reinstating each bug and confirming a `[FAIL]` with the right fix line. |
+| 2026-09-26 | **Boot autostart confirmed at a real reboot — and it exposed a startup race** | The machine rebooted at 19:12:26 (the first reboot since the fix), so the previously-unproven claim could finally be settled. Sunshine **did** start on its own at 19:12:37, 11 s after boot, pulled in by the boot transaction — which is exactly the behaviour the fix was for, and it was reached with nobody touching the machine. But that boot also revealed a second, independent defect: Sunshine probes `/dev/dri` **exactly once** at startup and, if it is missing, disables kmsgrab permanently for the process lifetime (`Couldn't find /dev/dri, kmsgrab won't be enabled` → `Unable to initialize capture method` → `Fatal: Unable to find display or encoder during startup`). At this boot the unit started at 19:12:37 and probed at 19:12:38, while card1 — the dummy-plug GPU — only finished DRM init at 19:12:39. **It lost the race by one second**, disabled kmsgrab, and came up `active` while unable to capture anything; a manual restart always "fixed" it, which is what makes this easy to mistake for a flaky GPU. Fixed with a bounded `ExecStartPre` wait for the DRM node. Explicitly *not* fixed with a device-unit dependency: `Requires=`/`After=dev-dri-renderD129.device` does not work in the *user* manager — the device unit is never activated there, so the start job hangs forever (verified, it blocked until cancelled). Detect it via the new `/dev/dri` check in `sunshine-status.sh`. |
+| 2026-09-26 | `sunshine-boot-check.sh` gave a false FAIL — it read the wrong start | Written to answer "did it start at boot, or by hand", it initially read `ActiveEnterTimestamp` — the *latest* start — so any later restart (a hand restart, or a fix applied after boot) either masked a real autostart failure or, as happened here, reported a healthy boot start as a late manual one. It now takes the **first** `Started sunshine.service` line in the current boot, which is the only event that says whether systemd pulled the unit in by itself, and prints the current instance separately for context. Worth noting the failure mode: the script's own bug produced a confident, specific, wrong diagnosis ("started 2913s after boot"), which is exactly the kind of output that sends you re-fixing something that already works. |
+| 2026-09-26 | Unit had `StartLimitIntervalSec` in the wrong section, and a no-op `network-online.target` | Found by an independent verification pass over the new unit rather than by a failure. `StartLimitIntervalSec=0` was placed in `[Service]`, where systemd ignores it — `systemd-analyze --user verify` says `Unknown key 'StartLimitIntervalSec' in section [Service], ignoring`, and the effective values stayed at the default `10s`/`Burst=5`. So the intended "retry forever" never existed; a start that failed during a compositor window could trip the limit and leave the unit permanently failed. Removed rather than relocated, since the defaults are the right behaviour for a service that should either stay up or fail loudly. Separately, `After=network-online.target` was inert: that target is `LoadState=not-found` in the *user* manager, so it offered no ordering guarantee while looking like one. Both are gone; the unit now validates with zero warnings. Worth repeating as a habit: `systemd-analyze --user verify <unit>` catches silently-ignored keys that `systemctl show` will happily report as defaults. |
 | 2026-09-21 | **Switched to card1 + dummy plug — now genuinely headless** | Dummy plug installed; it landed on card1's **`DP-4`** (DisplayPort), not an HDMI port, so the config's assumed `HDMI-A-2` was wrong — caught immediately because `sunshine-status.sh` cross-checks `output_name` against sysfs rather than trusting the config. Set `output_name = DP-4`, `adapter_name = /dev/dri/renderD129`; 17/17 diagnostic checks pass. KMS resolves it (`Mapped 'DP-4' to kmsgrab monitor index 0`, `Found connector ID [378]`), and card1 gained `fb1: amdgpudrmfb`. |
 | 2026-09-21 | Proved the setup is headless rather than assuming it | Verified capture with the graphical environment *fully removed* (`DISPLAY`, `WAYLAND_DISPLAY`, `XDG_SESSION_TYPE`, `XDG_RUNTIME_DIR` unset): KMS still mapped `DP-4`, found the connector and monitor, and produced `h264_vulkan`. This distinguishes it from the earlier interim setup, which broke whenever card0's physical monitor powered off. Also confirmed capture re-establishes across a service restart, with no SEGV (unlike the mid-stream restart seen previously). card0 remains the documented fallback if the plug is removed. |
 | 2026-09-19 | **Confirmed streaming works end-to-end with a real client** | Moonlight connected and streamed: `New streaming session started [active sessions: 1]` → `CLIENT CONNECTED`, with the full pipeline up — `Vulkan encode using GPU: AMD Radeon RX 7900 XTX (RADV NAVI31)`, Opus 48 kHz audio, bitrate negotiated at 7.3 Mbps. This is the first proof the card0/KMS configuration works for real, not just that the probes pass. |

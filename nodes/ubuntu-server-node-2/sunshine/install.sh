@@ -9,8 +9,10 @@
 # What this does, and why each piece is safe to run repeatedly:
 #   1. Copies sunshine.conf into ~/.config/sunshine/ (idempotent overwrite of a
 #      config file this repo owns — the package-generated one is empty).
-#   2. Installs the packaged systemd *user* unit under ~/.config/systemd/user/
-#      so it can be enabled, restarted and edited without root.
+#   2. Installs this repo's systemd *user* unit under ~/.config/systemd/user/
+#      so it can be enabled, restarted and edited without root. The unit is
+#      repo-owned (systemd/sunshine.service), NOT a copy of the packaged one —
+#      see the comment in that file for why (headless host + boot autostart).
 #   3. Enables + (re)starts it.
 #
 # Everything here is unprivileged. The account is already in the `render`,
@@ -34,10 +36,14 @@ CONF_DIR="$HOME/.config/sunshine"
 CONF_DST="$CONF_DIR/sunshine.conf"
 
 UNIT_NAME="sunshine.service"
-# The Debian package ships its unit as app-dev.lizardbyte.app.Sunshine.service
-# with `Alias=sunshine.service`. Installing a copy under the alias name lets us
-# manage it as `sunshine.service` without depending on the package's path.
-UNIT_SRC="/usr/lib/systemd/user/app-dev.lizardbyte.app.Sunshine.service"
+# The unit is owned by this repo, not by the package. The packaged unit
+# (/usr/lib/systemd/user/app-dev.lizardbyte.app.Sunshine.service) is written for
+# a desktop session: it is WantedBy=graphical-session.target, a target that only
+# a *desktop login* reaches. This machine is a headless stream host that must
+# come up at boot with nobody logged in, so the repo unit anchors on
+# default.target instead. Installing a copy under the alias name lets us manage
+# it as `sunshine.service` without depending on the package's path.
+UNIT_SRC="$SCRIPT_DIR/systemd/sunshine.service"
 UNIT_DIR="$HOME/.config/systemd/user"
 UNIT_DST="$UNIT_DIR/$UNIT_NAME"
 
@@ -96,13 +102,20 @@ fi
 # Install the user unit
 # ---------------------------------------------------------------------------
 mkdir -p "$UNIT_DIR"
-if [[ -f "$UNIT_SRC" ]]; then
-    cp "$UNIT_SRC" "$UNIT_DST"
-    log "Installed unit -> $UNIT_DST"
-elif [[ ! -f "$UNIT_DST" ]]; then
-    warn "Packaged unit not found at $UNIT_SRC and no unit installed."
-    echo "Run: dpkg -L sunshine | grep systemd   to locate it, then copy it manually."
+if [[ ! -f "$UNIT_SRC" ]]; then
+    warn "Repo unit not found at $UNIT_SRC — cannot install a boot-starting service."
     exit 1
+fi
+install -m 0644 "$UNIT_SRC" "$UNIT_DST"
+log "Installed unit -> $UNIT_DST"
+
+# Drop a stale enable symlink under graphical-session.target. Older revisions of
+# this script copied the packaged unit, which enabled itself into that target;
+# leaving the link behind keeps a second, desktop-only start path alive.
+STALE_WANT="$UNIT_DIR/graphical-session.target.wants/$UNIT_NAME"
+if [[ -L "$STALE_WANT" ]]; then
+    rm -f "$STALE_WANT"
+    log "Removed stale $(basename "$(dirname "$STALE_WANT")")/$UNIT_NAME symlink"
 fi
 
 systemctl --user daemon-reload
@@ -142,6 +155,25 @@ if [[ "$linger" == "yes" ]]; then
 else
     warn "  Linger=$linger — the service will STOP when you log out."
     echo "  Fix with:  sudo loginctl enable-linger $USER"
+fi
+
+echo
+# Boot persistence is the whole point of this unit, and it is easy to get wrong
+# in a way that still looks fine interactively (`enable` + a manual start). Check
+# the two things that actually decide whether it comes up unattended:
+#   - the enable symlink must hang off default.target, not graphical-session.target
+#   - linger must be on, or the user manager never starts at boot at all
+log "Boot-autostart check (starts with nobody logged in):"
+if [[ "$linger" != "yes" ]]; then
+    warn "  WILL NOT START AT BOOT: lingering is off, so user@$(id -u).service"
+    echo "         (and everything wanted by default.target) never runs."
+    echo "         Fix with:  sudo loginctl enable-linger $USER"
+elif [[ -L "$UNIT_DIR/default.target.wants/$UNIT_NAME" ]]; then
+    log "  enable symlink -> default.target.wants: OK"
+    log "  Linger=yes: OK — Sunshine will start on boot with no login."
+else
+    warn "  WILL NOT START AT BOOT: no default.target.wants/$UNIT_NAME symlink."
+    echo "         Fix with:  systemctl --user enable $UNIT_NAME"
 fi
 
 echo

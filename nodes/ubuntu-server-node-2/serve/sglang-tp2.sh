@@ -96,6 +96,23 @@ serve_args() {
     # This model only pays full-attention KV on 16 of its 64 layers (the other
     # 48 are linear attention, held in the fixed-size mamba cache), which is why
     # a 262k-position model fits in 7.5 GB of KV at all.
+    #
+    # --tool-call-parser / --reasoning-parser are REQUIRED for agent clients
+    # (DSH and any OpenAI-compatible caller sending a `tools` array):
+    #
+    #   * SGLang's parser auto-detection only runs when a field is literally
+    #     "auto" (ServerArgs defaults both to None), so with no flag the server
+    #     installs NO tool parser. It then returns the model's <tool_call> XML
+    #     verbatim inside message.content with tool_calls=null, and the client
+    #     sees a plain answer instead of a tool invocation.
+    #   * The template contains <function=/<parameter=, so detection resolves to
+    #     qwen3_coder ("auto" would work too; explicit avoids depending on
+    #     startup template introspection). qwen3_5 is not in SGLang's
+    #     architecture fallback map, so `auto` can only use the template.
+    #   * This is a thinking model and the template expects prior-turn thinking
+    #     re-wrapped; without a reasoning parser the ...</think> block leaks
+    #     into content and corrupts multi-turn agent history. qwen3 (not
+    #     qwen3-thinking) fails to split it -- verified in-container.
     echo "--model-path /models \
 --quantization gptq \
 --dtype bfloat16 \
@@ -113,6 +130,8 @@ serve_args() {
 --speculative-num-draft-tokens 4 \
 --cuda-graph-bs-decode 1 2 4 \
 --triton-attention-num-kv-splits 16 \
+--tool-call-parser qwen3_coder \
+--reasoning-parser qwen3-thinking \
 --sleep-on-idle \
 --trust-remote-code"
 }

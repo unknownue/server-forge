@@ -322,6 +322,154 @@ pre-built `rdna_ar_ext`. All are scripted and documented in the results file.
 > **wrong** — P2P was fixable in software (kernel whitelist + RCCL clamp), and
 > once fixed, TP=2 reproduces as above.
 
+## Tool calling / agents (DSH) — FIXED (two missing server flags)
+
+**Symptom**: an agent client (DSH, or anything OpenAI-compatible that sends a
+`tools` array) fails to call tools against `:8080`. The model *does* intend to
+call a tool, but the tool call arrives as plain-text XML inside
+`choices[0].message.content`, while `tool_calls` is `null`:
+
+```json
+{"content": "…\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBeijing\n</parameter>\n</function>\n</tool_call>",
+ "tool_calls": null, "finish_reason": "stop"}
+```
+
+The client parses `tool_calls`, sees `null`, and reports a plain answer with no
+tool invocation. `finish_reason` is `stop`, never `tool_calls`. This is a
+**server-side parsing** problem, not a model-capability problem — the checkpoint
+emits the correct format on its own.
+
+### Root cause 1 (the failure): no `--tool-call-parser`
+
+`sglang-tp2.sh` passed **no** parser flags. SGLang only auto-detects a parser
+when the field is explicitly set to `auto`:
+
+```python
+# sglang/srt/parser/template_detection.py  -> resolve_auto_parsers()
+needs = tuple(attr for attr in ("reasoning_parser", "tool_call_parser")
+              if getattr(cfg, attr) == "auto")
+if not needs:
+    return          # <-- default None takes this early return
+```
+
+The declared default is `None`, not `"auto"`:
+
+```python
+tool_call_parser  = None     # msgspec field default in ServerArgs
+reasoning_parser  = None
+```
+
+So with no flag, `needs` is empty, detection never runs, and **no parser is
+installed**. The response is then assembled with the raw model text as
+`content` and `tool_calls = null` — exactly what was observed.
+
+Note the detector itself is fine. Run against this checkpoint's own template it
+returns the right answer, which is why the bug is invisible in the logs:
+
+```bash
+$ docker exec sglang-tp2-tp2 python3 -c "
+from sglang.srt.parser.template_detection import detect_tool_call_parser
+from transformers import AutoTokenizer
+tpl = open('/models/chat_template.jinja').read()
+tok = AutoTokenizer.from_pretrained('/models', trust_remote_code=True)
+print(detect_tool_call_parser(tpl, tok))"
+qwen3_coder
+```
+
+The template contains both `<function=` and `<parameter=`, so the
+`_is_qwen3_coder` rule matches and `qwen3_coder` is the correct parser. It is
+simply never asked.
+
+`qwen3_5` (`Qwen3_5ForConditionalGeneration`) is also **not** in the
+architecture-based fallback map (`_architecture_auto_parsers`), which only
+knows `KimiK3`, `DeepseekV4`, and `DeepseekV3` — so even `auto` would have to go
+through the chat template, which does work here.
+
+### Root cause 2 (context corruption): no `--reasoning-parser`
+
+The model is a *thinking* model (`detect_reasoning_pattern` →
+`toggle_param='enable_thinking', default_enabled=True`). With no reasoning
+parser, the thinking channel is never split out, so the `…</think>` block
+leaks into `content` and is sent back to the client as assistant prose. Over a
+multi-turn agent loop that rewrites the model's own history, since the template
+expects prior-turn thinking to be re-wrapped in `<|im_start|>assistant\n thinking`.
+
+Verified in-container:
+
+```python
+ReasoningParser('qwen3'          ).parse_non_stream(out)  # ('',  '…thinking…</think>…')  # not split
+ReasoningParser('qwen3-thinking' ).parse_non_stream(out)  # ('…thinking…', '…')           # split correctly
+```
+
+Use `qwen3-thinking` for this checkpoint.
+
+### Fix
+
+Add both flags to `serve_args()` in `serve/sglang-tp2.sh`:
+
+```bash
+--tool-call-parser qwen3_coder \
+--reasoning-parser qwen3-thinking \
+```
+
+(`--tool-call-parser auto` also resolves to `qwen3_coder` on this checkpoint and
+is more future-proof; the explicit value removes the dependency on template
+introspection succeeding at startup.)
+
+Verified by driving the real parser with the exact string the live server
+returned:
+
+```python
+FunctionCallParser(tools=tools, tool_call_parser='qwen3_coder')
+    .parse_non_stream(model_output)
+# normal_text = "…Let's call it.\n</think>\n\n"
+# calls       = [ToolCallItem(tool_index=0, name='get_weather',
+#                             parameters='{"city": "Beijing"}')]
+```
+
+**Applied and verified (2026-09-26).** The launcher carries both flags and the
+server was restarted onto them. Confirmed on the live endpoint:
+
+| Check | Before fix | After fix |
+|:---|:---|:---|
+| `finish_reason` | `stop` | `tool_calls` |
+| `tool_calls` | `null` | `[{"function":{"name":"get_weather","arguments":"{\"city\": \"Beijing\"}"}}]` |
+| `content` | raw `<tool_call>` XML | `'\n\n'` (clean) |
+| `reasoning_content` | `null` (leaked into `content`) | thinking correctly separated |
+
+Also verified: the **streaming** path (per-chunk `tool_calls` deltas reassembling
+to `{"city": "Beijing"}`, `finish_reason: tool_calls`), the **multi-turn** round
+trip (tool result fed back → model answers "sunny, 24°C" with `finish_reason:
+stop`), and a DSH-shaped request with three tools, which selected the right tool
+with well-formed arguments.
+
+Re-check any time with:
+
+```bash
+curl -s http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model":"Qwen3.8-27B-W4A16-AutoRound-GPTQ",
+  "messages":[{"role":"user","content":"Weather in Beijing? Use the tool."}],
+  "tools":[{"type":"function","function":{"name":"get_weather",
+    "parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}],
+  "tool_choice":"auto"}' | python3 -c 'import sys,json; print(json.load(sys.stdin)["choices"][0]["message"]["tool_calls"])'
+```
+
+Expect a populated `tool_calls` array, not `null`.
+
+> **If tool calling ever regresses**, check first whether the container is running
+> stale arguments: `docker inspect sglang-tp2-tp2 --format '{{json .Config.Cmd}}'`.
+> A container started before this fix (or by a profile that bypasses
+> `serve_args()`) will be missing `--tool-call-parser` and will silently return
+> tool calls as text again — there is no error in the logs when this happens.
+
+### Small-model caveat
+
+Separate from the parser bug: the checkpoint is a 27B-class model running at
+`--max-running-requests 2`. It is reliable **one tool call at a time**, but
+agent loops with many tools and long histories will stress it. `tool_choice:
+"required"` is notably worse here (the model answered with a bare JSON array
+instead of the XML format), so prefer `auto`.
+
 ## Mirror & offline-install notes
 
 This network cannot reach Docker Hub, `pypa.io`, or `github.com` raw reliably.
@@ -366,6 +514,225 @@ sudo apt install -y python3-venv python3-pip
 `/data/work` is. Scripts here therefore default their scratch space to
 `/data/work/cache/...`. To use the intended `/data/cache`, run
 `sudo bash scripts/fix-data-permissions.sh` (or `sudo chown "$USER" /data/cache`).
+
+## Sunshine game streaming (Moonlight)
+
+Sunshine is the self-hosted Moonlight host. It runs **headless: KMS capture on
+card1's dummy plug**, with AMD VCN hardware encoding — so it streams with no
+monitor attached and nobody logged in.
+
+```bash
+bash nodes/ubuntu-server-node-2/sunshine/install.sh          # apply config + enable service
+bash nodes/ubuntu-server-node-2/sunshine/sunshine-status.sh  # diagnose (read-only, no root)
+bash nodes/ubuntu-server-node-2/sunshine/install.sh --remove # uninstall
+```
+
+Web UI (pairing): `https://192.168.50.143:47990` — user `unknownue`.
+
+### LAN access
+
+LAN access needs **both** of these, and they cover different things:
+
+| Setting | What it controls |
+|:---|:---|
+| `origin_web_ui_allowed = lan` | Which *client addresses* may talk to the Web UI at all |
+| `csrf_allowed_origins = ...` | Which *Origin headers* are trusted for state-changing requests |
+
+Both are set, and all four ports bind `0.0.0.0` (every interface, including the
+LAN), so no further exposure step is needed:
+
+```
+47984/tcp  47989/tcp  47990/tcp  48010/tcp
+```
+
+Verify from another machine, or locally against the LAN address:
+
+```bash
+curl -sk -u unknownue:PASSWORD -H "Origin: https://192.168.50.143:47990" \
+  https://192.168.50.143:47990/api/config -o /dev/null -w '%{http_code}\n'   # expect 200
+```
+
+A `401` on `GET /` is correct (the login page requires auth); a `200` on an
+authenticated `/api/*` call is the real proof access works.
+
+Two gotchas that produce a *false* "LAN access is broken" reading:
+
+- **`HTTP 000` means the connection failed, i.e. nothing is listening** — not a
+  firewall or origin problem. Check `systemctl --user is-active sunshine` first.
+  Sunshine can exit via its **system tray icon** ("Quitting from system tray"),
+  which is a clean exit and so does *not* trip `Restart=on-failure`.
+- **`ufw` is active on this host.** If LAN clients cannot reach the ports while
+  the service is confirmed listening, the firewall is the next suspect:
+  `sudo ufw status verbose`. The ports above may need explicit allows.
+
+### Web UI login is blocked unless the origin is allow-listed
+
+Sunshine ships a fixed built-in CSRF allow-list of **loopback origins with no
+port**:
+
+```
+https://127.0.0.1    https://localhost    https://[::1]
+```
+
+Browsing the UI by this host's LAN address is therefore *not* trusted, and every
+login POST is rejected with:
+
+```
+Web UI: [192.168.50.143] -- CSRF protection blocked request
+        from origin: https://192.168.50.143:47990
+```
+
+Fix by listing the exact origin the browser sends in `sunshine.conf` (applied
+here, so the UI works over the LAN address):
+
+```ini
+csrf_allowed_origins = https://192.168.50.143:47990, https://localhost:47990, https://127.0.0.1:47990
+```
+
+Three details that make this easy to get wrong:
+
+- Entries must include the **scheme and the port**, and must match the address
+  bar exactly. `http://` vs `https://`, or an omitted `:47990`, is silently not
+  trusted and the same error comes back.
+- Malformed entries are rejected at startup with
+  `Invalid 'csrf_allowed_origins' entry rejected: <value>` — check the journal
+  after editing rather than assuming it took.
+- The IP here is **DHCP** (currently `192.168.50.143`). If it changes, the block
+  returns until this line is updated. A static lease or adding the new address
+  is the fix.
+
+Note the UI login itself is HTTP Basic Auth against `/api/*`, and the app is a
+single-page front-end that fetches an `X-CSRF-Token` from `/api/csrf-token`
+after authenticating. That two-stage flow is why a bare `POST /api/login`
+returns `400`/`401` and is not a sign of misconfiguration — verify with:
+
+```bash
+curl -sk -u unknownue:PASSWORD -H "Origin: https://192.168.50.143:47990" \
+  https://192.168.50.143:47990/api/config -o /dev/null -w '%{http_code}\n'   # expect 200
+```
+
+### Current setup: card1 + dummy plug (true headless)
+
+There are two candidate GPUs, and the config can point at either:
+
+| | card0 (`05:00.0`, renderD128) | card1 (`08:00.0`, renderD129) |
+|:---|:---|:---|
+| Display | physical monitor on `HDMI-A-1` | **dummy plug on `DP-4`** |
+| Used by | SGLang TP=2 + physical desktop | idle for compute |
+| Free VRAM | 1.3 GiB | 2.1 GiB |
+| Role | fallback only | **active target** |
+
+card1 is the target because it has more free VRAM and does not drive the desktop.
+Its `DP-4` connector carries a **dummy plug (EDID emulator)**: a fake monitor, so
+the connector reports `connected` and exposes a real EDID with 26 modes up to
+4K, but no display exists. KMS therefore always has a framebuffer to grab.
+
+**The dummy plug is on DisplayPort, not HDMI** — do not infer the port from the
+plug's shape. Confirm from sysfs via `sunshine-status.sh`, which cross-checks
+`output_name`/`adapter_name` against sysfs and fails loudly on a mismatch, so a
+stale or half-edited config cannot silently capture the wrong GPU.
+
+#### Verified headless
+
+Capture was confirmed to work with the graphical environment fully removed —
+`DISPLAY`, `WAYLAND_DISPLAY`, `XDG_SESSION_TYPE` and `XDG_RUNTIME_DIR` all unset:
+
+```
+Mapped 'DP-4' to kmsgrab monitor index 0
+Found connector ID [378]
+Found monitor for DRM screencasting
+Found H.264 encoder: h264_vulkan [vulkan]
+```
+
+So streaming does not depend on a logged-in session, a compositor, or the
+physical monitor — the point of the dummy plug. It also survives a service
+restart and re-establishes capture on its own.
+
+This replaces the earlier interim setup that captured card0's physical monitor,
+which stopped working whenever that monitor was powered off or its CRTC was torn
+down. card0 remains a valid fallback (`output_name = HDMI-A-1`,
+`adapter_name = /dev/dri/renderD128`) if the dummy plug is ever removed.
+
+### GPU cost of streaming
+
+Worth knowing because both cards are already ~22 GiB/24 GiB full from SGLang:
+
+- **Video encoding runs on the GPU's dedicated VCN block**, not the HIP/compute
+  queues the LLM uses, so it does not slow inference down.
+- It does consume a small amount of VRAM for encoder frame buffers (hundreds of
+  MiB), which is why the target is card1 (2.1 GiB free) rather than card0
+  (1.3 GiB, shared with the desktop and SGLang). If SGLang is later retuned with
+  a higher `--mem-fraction-static` and streams start failing to allocate, check
+  this first.
+- The alternative `vkms` software-display path was rejected: vkms is a CPU
+  memcpy CRTC with no path to the AMD encoder, so it would waste the hardware
+  encoder entirely and burn several CPU cores per stream.
+
+### Encoder selection — verify, do not assume
+
+Sunshine validates a named encoder at startup with a **real test encode against
+the active capture surface**. The result depends on which backend is capturing,
+and this already caused a silent fallback during setup:
+
+| capture path | `h264_vulkan` | `av1_vulkan` | `hevc_vulkan` |
+|:---|:---|:---|:---|
+| KMS/DRM | PASS | PASS | **FAIL** |
+| Wayland portal | PASS | **FAIL** | **FAIL** |
+
+Failure is a journal warning plus fall-through to the probe order, not a startup
+error:
+
+```
+Error: Couldn't find any working encoder matching [av1_vulkan]
+```
+
+HEVC fails on both paths even though Mesa advertises `VK_KHR_video_encode_h265`
+(confirmed with `strings` on `libvulkan_radeon.so`), so it is a Sunshine/Mesa
+validation-path issue rather than a missing driver extension. `hevc_vaapi` fails
+too. **`h264_vulkan` is therefore the configured default** — the only encoder
+that passes in every configuration here, and universally decodable by clients.
+`av1_vulkan` should also pass now that KMS capture is live, and is worth trying
+once a client is confirmed to decode AV1; `hevc_mode`/`av1_mode` stay at `1` so
+Moonlight can still negotiate them per-session. Re-check with
+`sunshine-status.sh` after any Sunshine/Mesa upgrade.
+
+Also note `fps` is **not** a valid server option (it is negotiated per client by
+Moonlight); adding it produces `Warning: Unrecognized configurable option [fps]`.
+
+### Reading the log: two false alarms
+
+Both of these look like errors and are not — worth knowing before debugging a
+working setup:
+
+- **`Error: Couldn't find monitor [0]`** appears during Sunshine's startup
+  encoder sweep, which probes monitors in an order that need not match the
+  configured connector. It shows up even when KMS subsequently resolves the
+  output correctly. The authoritative success signals, all at the default `info`
+  level, are `Mapped '<connector>' to kmsgrab monitor index N`,
+  `Found connector ID [...]`, and `Found monitor for DRM screencasting`.
+  (`Final KMS display_names return list` also means success, but it is
+  **debug-only** — don't key checks off it.)
+- **`Error: Couldn't find any working encoder matching [...]`** during that same
+  sweep. Sunshine prints `Testing for available encoders, this may generate
+  errors. You can safely ignore those errors.` right before it. Only the
+  post-sweep `Found ... encoder` lines reflect the real conclusion.
+
+### When a dummy plug is available
+
+See the migration steps in "Current setup" above. `dd_configuration_option =
+disabled` is deliberate and should stay that way: there is no display server
+managing these outputs, and letting Sunshine attempt mode changes on a dummy-plug
+output causes streams to start and then immediately die. The dummy plug's EDID
+defines the available modes.
+
+### Service model
+
+Runs as a `systemd --user` unit (`~/.config/systemd/user/sunshine.service`),
+enabled and active. `Linger=yes` is already set on this account, so it survives
+logout — without lingering a user service stops at logout, which would defeat
+the point of a headless stream host. Needs no root: the account is already in
+`render`, `video` and `input`, covering `/dev/dri/*` and gamepad injection via
+`uhid` (loaded; `uinput` is built into the kernel).
 
 ## Service Hub (web UI)
 
@@ -462,6 +829,10 @@ ubuntu-server-node-2/
 │   ├── systemd/service-hub.service
 │   ├── src/service_hub/           # FastAPI backend (sysfs GPU monitor)
 │   └── frontend/                  # Vue 3 + Vite, builds into static/
+├── sunshine/            # Moonlight host: headless KMS capture on card1
+│   ├── sunshine.conf              # Config (KMS, encoder, display device)
+│   ├── install.sh                 # Apply config + enable user service
+│   └── sunshine-status.sh         # Read-only diagnostic (no root)
 └── bench/               # Performance tests / platform probes
     ├── check-p2p-hip.sh           # GPU P2P probe (HIP only)  ← run first
     ├── check-p2p.sh               # Same, PyTorch-based variant
@@ -487,6 +858,16 @@ ROCm images.
 
 | Date | Issue / Action | Resolution |
 |:---|:---|:---|
+| 2026-09-21 | **Switched to card1 + dummy plug — now genuinely headless** | Dummy plug installed; it landed on card1's **`DP-4`** (DisplayPort), not an HDMI port, so the config's assumed `HDMI-A-2` was wrong — caught immediately because `sunshine-status.sh` cross-checks `output_name` against sysfs rather than trusting the config. Set `output_name = DP-4`, `adapter_name = /dev/dri/renderD129`; 17/17 diagnostic checks pass. KMS resolves it (`Mapped 'DP-4' to kmsgrab monitor index 0`, `Found connector ID [378]`), and card1 gained `fb1: amdgpudrmfb`. |
+| 2026-09-21 | Proved the setup is headless rather than assuming it | Verified capture with the graphical environment *fully removed* (`DISPLAY`, `WAYLAND_DISPLAY`, `XDG_SESSION_TYPE`, `XDG_RUNTIME_DIR` unset): KMS still mapped `DP-4`, found the connector and monitor, and produced `h264_vulkan`. This distinguishes it from the earlier interim setup, which broke whenever card0's physical monitor powered off. Also confirmed capture re-establishes across a service restart, with no SEGV (unlike the mid-stream restart seen previously). card0 remains the documented fallback if the plug is removed. |
+| 2026-09-19 | **Confirmed streaming works end-to-end with a real client** | Moonlight connected and streamed: `New streaming session started [active sessions: 1]` → `CLIENT CONNECTED`, with the full pipeline up — `Vulkan encode using GPU: AMD Radeon RX 7900 XTX (RADV NAVI31)`, Opus 48 kHz audio, bitrate negotiated at 7.3 Mbps. This is the first proof the card0/KMS configuration works for real, not just that the probes pass. |
+| 2026-09-19 | LAN access verified; two false alarms worth recording | `origin_web_ui_allowed = lan` was already correct and all four ports bind `0.0.0.0`, so nothing needed changing — but a check returned `HTTP 000`, which looked like a firewall problem. It was not: the service had **exited from its tray icon** ("Quitting from system tray"), and a clean exit does not trip `Restart=on-failure`, so nothing was listening. Separately, a `code=dumped, status=11/SEGV` in the journal looked like a crash; the preceding `Terminate handler called` / `Main loop has exited` show the main loop had already ended, so it was a fault in *teardown* while `systemctl restart` ran with an active stream. A later clean `stop` produced no SEGV, confirming it is specific to restarting mid-stream and does not affect normal operation. Note `ufw` **is active** here, so if LAN clients ever cannot reach the ports while the service is confirmed listening, that is the next thing to check. |
+| 2026-09-19 | Web UI login rejected: `CSRF protection blocked request` | Sunshine's built-in CSRF allow-list is **loopback-only and port-less** (`https://127.0.0.1`, `https://localhost`, `https://[::1]`), so browsing the UI at the LAN address `https://192.168.50.143:47990` was never trusted and every login POST was refused. Added `csrf_allowed_origins` with the IP origin plus both loopback origins; verified `GET /api/config` returns 200 over all three and the journal shows **0** CSRF blocks (was 3). Entries need scheme+port and must match the address bar exactly — a near-miss fails silently. The IP is DHCP, so a lease change will reintroduce this. |
+| 2026-09-19 | Chased a non-existent `/api/login` endpoint while verifying the CSRF fix | This Sunshine build has no `/api/login`; the UI is a SPA using HTTP **Basic Auth** on `/api/*` and then fetching an `X-CSRF-Token` from `/api/csrf-token`. Probing `/api/login` returned `400`/`401`, which looked like the fix had failed when it had actually worked. Confirmed the real distinction in the journal: before the fix the request was *rejected* (`CSRF protection blocked`); after it, the same request merely returned `401` from a route that does not exist. Documented the correct verification command in the README. |
+| 2026-09-19 | Configured Sunshine for Moonlight streaming | Runs as an enabled `systemd --user` unit with `Linger=yes` already on, needing no root (account is in `render`/`video`/`input`; `uhid` loaded, `uinput` built-in). Capture is **KMS, not the Wayland portal**, so it does not depend on a live compositor session. Setup scripted in `sunshine/` (`install.sh` + read-only `sunshine-status.sh`), both **config-driven**: the target card is resolved from `adapter_name` via DRM device symlinks, and `output_name` is cross-checked against sysfs, because this node has moved between cards. |
+| 2026-09-19 | Streaming targets **card0 (interim)** — no dummy plug available | card1 is the correct headless target (more free VRAM: 2.1 vs 1.3 GiB; not driving the desktop), but KMS needs a connected connector + active CRTC, and all four card1 connectors are `disconnected`. With no dummy plug on hand, the config points at card0's `HDMI-A-1`, which is already `connected`/`enabled` with 39 modes up to 4K. Verified end-to-end: KMS resolves the connector and encoder, 17/17 diagnostic checks pass, survives a service restart. **This is not headless** — it captures the physical monitor, so powering the monitor off or losing the CRTC stops the stream. Migration steps (dummy plug on card1, then flip `output_name`/`adapter_name`) are in the README. |
+| 2026-09-19 | Misdiagnosed `Couldn't find monitor [0]` as a hard failure | Treated it as proof that KMS had no framebuffer and built the first version of the diagnostics and docs around that. Wrong: it is emitted during Sunshine's **startup encoder sweep**, which probes monitors in an order that need not match the configured connector, and it appears on a fully working setup. The real `info`-level success signals are `Mapped '<connector>' to kmsgrab monitor index N`, `Found connector ID [...]` and `Found monitor for DRM screencasting`. A later version keyed off `Final KMS display_names return list`, which is **debug-only** and so produced a false warning at the default log level. Status script now checks the info-level signals and only flags the message when no target was resolved. Recorded in README as a known false alarm. |
+| 2026-09-19 | Sunshine silently fell back to the wrong encoder | `encoder` is validated by a **test encode against the active capture surface**, so the pass set differs by backend: KMS passes h264+av1 but not hevc; the portal passes only h264. `av1_vulkan` was set first and failed once the service ran under the portal, producing only a journal warning (`Couldn't find any working encoder matching [av1_vulkan]`) and a quiet fall-through. HEVC fails on both paths despite Mesa exposing `VK_KHR_video_encode_h265`, so it is a Sunshine/Mesa validation issue, not a missing extension. Settled on `h264_vulkan` as the only universally-valid encoder, with `hevc_mode`/`av1_mode` left at `1` for per-session negotiation. Also removed an invalid `fps` key (`Unrecognized configurable option`). |
 | 2026-09-19 | Added a desktop launcher for the Service Hub | Installed `~/Desktop/service-hub.desktop` + `.sh` via `install-desktop.sh`. Two deliberate choices: it does **not** start a second hub (the systemd user service with lingering is normally already serving, so a bare `deploy.sh` would collide on :9090) — it health-checks first and only opens the browser; and the thing to double-click is a `.desktop` file, because this GNOME session has no handler for `text/x-shellscript` and would otherwise open a text editor. Verified the stopped -> launcher -> running -> browser cycle. |
 | 2026-09-19 | Window was set 64K below the model's real limit | `max_position_embeddings` is 262,144 (256K, no rope_scaling), but `--context-length` was 196,608 — a self-imposed cap wasting a quarter of the model's capacity. Raised to **262,144** and verified with real prompts (199,858 / 239,854 / 259,852 tokens all served, zero OOM); over-length input is rejected cleanly with HTTP 400. Corrected an earlier claim in this repo that the KV pool was a surplus to redistribute — it is the scarce resource (short of 2x256K by 239,872), and the window was the actual waste. Note no window lets 2 requests each use it fully: 256K maximises a single request, 192K balances two. See `bench/results/context-256k.txt`. |
 | 2026-09-19 | Retuned for concurrency 2 and maximum usable memory | `--mem-fraction-static` 0.90 -> **0.96**, `--max-running-requests` 4 -> **2**, context window left at 196,608. KV pool grew 232,392 -> **284,777 tokens** (+22%); c=2 throughput 41.0 -> 50.8 tok/s. Verified with two concurrent 130k prompts (impossible under the old pool), a 140k single request, and a worst-case 2x140k + 600-token MTP stress run with zero OOM. Note c=2 shares one pool, so 2 x 196k (393,216) still does not fit — the gain is two *medium* long requests. See `bench/results/context-concurrency-tuning.txt`. |

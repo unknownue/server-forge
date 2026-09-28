@@ -1,0 +1,77 @@
+# MiMo-V2.6-Flash-RL — 4 GPUs, TP4, 1M context, published on the LAN.
+#
+# Serves Xiaomi's MiMo-V2.6-Flash-RL (309B total / 15B active, MXFP4 experts,
+# FP8 dense, natively omnimodal, 1M-token context) on the node's 4x RTX 6000D
+# (SM120, 85 GB each, PCIe, no NVLink) through vLLM plus the SM120-specific
+# kernel/attention stack published by Diffbot for RTX PRO 6000 Blackwell.
+#
+# SECURITY: the API key is the only authentication and this node runs no firewall
+# (ufw, firewalld, nftables and iptables are all inactive). Anyone on
+# 192.168.50.0/24 who has the key can use this endpoint. The key lives at
+# /data/work/mimo26/state/api-key — treat it as a LAN secret and rotate it by
+# deleting that file before restarting.
+#
+# Capacity — MEASURED on this node (TP4, fp8 KV, max-num-seqs 8):
+#   util 0.95 (default): GPU KV cache size 10,877,194 tokens; "Maximum concurrency
+#     for 1,048,576 tokens per request: 10.37x"; 34.76 GiB KV per card; 82,496 MiB
+#     used per card; 1M cold prefill verified (981,754 prompt tokens, TTFT 573 s,
+#     peak 82,784 MiB, no OOM).
+#   util 0.90: 9,577,937 tokens / 30.53 GiB; leaves ~7 GiB per card idle.
+#   Engine-suggested absolute ceiling: --kv-cache-memory=40607249408 (37.82 GiB,
+#     ~11.8M tokens) but that leaves <1 GiB headroom - not the default.
+#   Verified: 29K needle found, tool calls OK, 4 x 200K unique-prefix concurrency
+#   4/4 (132 s wall, aggregate prefill 6,113 tok/s, fastest stream ~13,800 tok/s),
+#   1 x 1M request with TTFT 566.7 s and 149.1 tok/s decode. 46K prompts: prefill
+#   7,319 tok/s at C=1, 15,060 tok/s aggregate at C=4.
+#   Decode (prefilled streams, warm prefix): 46K 359 tok/s stream / 1,122 tok/s at
+#   C=8; 200K 284 / 779; 1M 158 / 561. Single-stream decode varies 210-360 tok/s
+#   with DFlash acceptance, not with the memory setting.
+#   Full numbers and caveats: bench/RESULTS-MIMO26-FLASH.md
+#   (upstream reference on 2x RTX PRO 6000: pool 467-479K tokens, 46K prefill
+#   10.2K tok/s, decode 189-193 tok/s - this node trades prefill for a 22x pool).
+#
+# VRAM budget per card at util 0.95 (85,651 MiB = 83.65 GiB):
+#   weights + non-torch (engine-reported)  43.21 GiB
+#   peak activation                         0.92 GiB
+#   CUDAGraph memory                        0.12 GiB
+#   KV pool                                34.76 GiB
+#   idle                                     ~3.1 GiB
+#
+# Requires (already provisioned on this node):
+#   model  /data/work/models/XiaomiMiMo/MiMo-V2.6-Flash-RL  (pinned revision,
+#          see config/models.conf)
+#   image  mimo-v26-omni:latest  (built from the vendored recipe's
+#          recipe/docker/Dockerfile.omni on top of
+#          vllm/vllm-openai:mimo-v26-x86_64-cu130)
+#   recipe /data/work/vendor/diffbot-mimo26-recipe  (patches + CUDA kernels)
+#
+# The API is published on 0.0.0.0:8010 — the same port as the DeepSeek profile,
+# because only one 4-GPU model can run at a time and LAN clients should keep one
+# stable endpoint. Clients use http://<host-ip>:8010/v1 with
+# `Authorization: Bearer <key>`; the address is a DHCP lease, so prefer the mDNS
+# name ubuntu26-node1-server.lan.
+#
+# Only ONE 4-GPU model can run at a time: switching to this profile stops
+# dsv41-flash (see stop_containers), and switching back stops this container.
+name: "mimo26-flash-8c-1m-lan"
+description: "MiMo-V2.6-Flash-RL TP4 (MXFP4 experts + FP8 KV + DFlash spec), 8 x 1M context cap, LAN-visible on 0.0.0.0:8010 (same port as the DeepSeek profile), sm_120 kernel stack"
+version: "1.0"
+
+gpu_allocation:
+  - gpu: [0, 1, 2, 3]
+    role: "text-inference"
+    model: "XiaomiMiMo/MiMo-V2.6-Flash-RL"
+    model_short: "MiMo-V2.6-Flash-TP4"
+    port: 8010
+    tp: 4
+    container_name: "mimo26-flash"
+    serve:
+      script: "serve/mimo26-flash.sh"
+      args:
+        - "1048576"
+        - "8"
+        - "0.0.0.0"
+
+stop_containers:
+  - "mimo26-flash"
+  - "dsv41-flash"

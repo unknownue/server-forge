@@ -136,15 +136,20 @@ async def list_profiles():
     for name, profile in profiles.items():
         roles = set()
         gpu_count = 0
+        ports: list[int] = []
         for alloc in profile.gpu_allocation:
             roles.add(alloc.get("role", "unknown"))
             gpu_count += len(alloc.get("gpu", []))
+            port = alloc.get("port")
+            if isinstance(port, int) and port not in ports:
+                ports.append(port)
         infos.append(ProfileInfo(
             name=profile.name,
             description=profile.description,
             version=profile.version,
             gpu_count=gpu_count,
             roles=sorted(roles),
+            ports=sorted(ports),
         ))
     return ProfileListResponse(profiles=infos)
 

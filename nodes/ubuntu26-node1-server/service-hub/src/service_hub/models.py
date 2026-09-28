@@ -47,6 +47,9 @@ class ProfileInfo(BaseModel):
     version: str
     gpu_count: int
     roles: list[str]
+    # Host ports the profile publishes, taken from each allocation's `port` field.
+    # Surfaced in the profile list so the endpoint is visible without expanding.
+    ports: list[int] = Field(default_factory=list)
 
 
 class ProfileDetail(BaseModel):

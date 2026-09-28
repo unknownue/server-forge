@@ -86,6 +86,9 @@ function doSwitch(name: string) {
             {{ expandedName === p.name ? 'Less' : 'Details' }}
           </button>
           <span class="tag gpu">{{ p.gpu_count }} GPUs</span>
+          <span v-for="port in p.ports" :key="port" class="tag port" title="Host port published on the LAN">
+            :{{ port }}
+          </span>
           <span v-for="r in p.roles" :key="r" class="tag">{{ r }}</span>
           <button
             class="btn btn-primary"

@@ -63,6 +63,7 @@ Interactive API docs: http://localhost:9090/docs
 | `qwen38-dspark-1gpu` | 0 | Qwen3.8-27B-NVFP4 DSPARK, 131K ctx, balanced (4.9 GiB headroom) |
 | `qwen38-dspark-2gpu` | 0,1 | Qwen3.8-27B-NVFP4 DSPARK TP=2, 256K model len (~227K+ usable, ~7 GiB/GPU headroom) |
 | `dsv41-flash-3c-620k-lan` | 0,1,2,3 | DeepSeek-V4.1-Flash TP4/EP4 + DSpark, 3 × 620k concurrent long sessions, published on `0.0.0.0:8010` for other machines on `192.168.50.0/24` (24 min cold prefill, then ~0.7 s cached turns). The API key is the only authentication — this node runs no firewall; see the profile's header. This is the node's only dsv41 profile: a localhost-only variant was removed so selecting the model cannot silently hide it from the LAN |
+| `mimo26-flash-8c-1m-lan` | 0,1,2,3 | MiMo-V2.6-Flash-RL TP4 (MXFP4 experts + FP8 KV + Marlin W4A8 + DFlash spec + sm_120 kernel stack), 8 slots, 1M context, KV pool 10,877,194 tokens (`--gpu-memory-utilization 0.95`), published on `0.0.0.0:8010` (same port as the DeepSeek profile). Measured: 1M prefill 1,713 tok/s (TTFT 573 s), 46K prefill 7,319 tok/s, concurrent decode 359 tok/s single stream / 1,122 tok/s aggregate at C=8 (46K). API key at `/data/work/mimo26/state/api-key` is the only authentication — see the profile header |
 | `unsloth` | 0,1,2,3 | Unsloth Studio (training) |
 | `anim-lab` | 0 | ComfyUI FLUX.2 image/video generation |
 
@@ -94,11 +95,38 @@ curl http://localhost:9090/api/current
 service-hub/
 ├── pyproject.toml              # uv project + dependencies
 ├── deploy.sh / stop.sh         # Lifecycle scripts
+├── frontend/                   # Vue 3 + Vite UI (built into static/)
+│   ├── src/components/         # GpuCards, ProfileList, SwitchHistory, ...
+│   └── vite.config.ts          # build.outDir = ../static
+├── static/                     # built UI served by FastAPI (generated)
 └── src/service_hub/
     ├── server.py               # FastAPI app + all endpoints
     ├── gpu_monitor.py          # nvidia-smi + Docker inspect
     ├── profile_executor.py     # Profile loading + switch logic
     └── models.py               # Pydantic data models
+```
+
+## Frontend
+
+The UI is a Vue 3 + Vite app in `frontend/`; FastAPI serves the built bundle from
+`static/`. Source edits do **not** take effect until the bundle is rebuilt:
+
+```bash
+cd service-hub/frontend
+npm run build          # writes ../static/index.html + ../static/assets/*
+```
+
+The profile list shows each profile's published host ports (`:8010`, `:8000,8001`
+...) as tags, read from `GET /api/profiles` → `profiles[].ports`, which the API
+derives from each allocation's `port` field in the profile YAML. Python-side
+changes (models/server) need a hub restart (`deploy.sh`); frontend-only changes
+just need the rebuild plus a browser refresh.
+
+Note: `deploy.sh` requires `uv`, which lives in `~/.local/bin`. On a non-login
+shell add it to PATH first:
+
+```bash
+PATH="$HOME/.local/bin:$PATH" bash service-hub/deploy.sh
 ```
 
 State is persisted in `service-hub/.state.json` (current profile + switch history).

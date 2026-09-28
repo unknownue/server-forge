@@ -273,6 +273,13 @@ header .status-badge {
 
 .tag.gpu { background: rgba(108, 124, 255, 0.15); color: var(--accent); }
 
+/* Host port a profile publishes, e.g. ":8010" */
+.tag.port {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: rgba(70, 200, 140, 0.15);
+  color: var(--green);
+}
+
 /* Buttons */
 .btn {
   padding: 8px 16px;

@@ -27,6 +27,7 @@ export interface ProfileInfo {
   version: string
   gpu_count: number
   roles: string[]
+  ports: number[]
 }
 
 export interface ProfileDetail {

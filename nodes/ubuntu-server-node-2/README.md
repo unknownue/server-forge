@@ -864,6 +864,175 @@ Two things are AMD-specific versus node1's hub:
 
 See `service-hub/README.md` for the API and how to add profiles.
 
+## ComfyUI (MiniMax H3 generation service)
+
+Backend generation service for animlab's Gate G1: ComfyUI on the second
+RX 7900 XTX, serving the MiniMax H3 Ref2VA video workflow and the Z-Image
+Design workflow on port **8189** (LAN-only, `0.0.0.0`, no auth, no CORS —
+the animlab backend is the only intended client; add
+`--enable-cors-header '*'` only as a documented debug flag). Node LAN IP:
+`192.168.50.143`.
+
+### Stack and pinned versions
+
+Rebuild image: `bash nodes/ubuntu-server-node-2/provision/build-comfyui.sh check`
+prints this table live.
+
+| Component | Pin (2026-10-03) | Notes |
+|:---|:---|:---|
+| ComfyUI | `v0.38.2` (daeb5e5) | ≥0.30.0 required; MiniMax H3 built-ins included |
+| Service image | `comfyui-gfx1100:local` | base `rocm/pytorch:latest` = py 3.12.3, torch 2.13.0+rocm7.14.0, av 19.0.1 |
+| `ComfyUI-MiniMax-H3-Turbo` (Larryvrh) | 4274783 (2026-08-14) | provides `MiniMaxH3TurboLoRA` |
+| `ComfyUI-KJNodes` (kijai) | d3cfe21 v1.5.2 | provides `VRAM_Debug` |
+| `Comfyui-Memory_Cleanup` (LAOGOU-666) | 58de13a | provides `RAMCleanup`, `VRAMCleanup` |
+| `ComfyUI-sol-attn` (r-vage) | 42bc674 v0.6.6 | provides `MiniMaxH3MemoryEfficientSolAttentionPatch` |
+
+**Provenance note (spec §4 deviation).** The deploy spec attributed the last
+three node types to `comfyui_fearnworksnodes`; the publicly published FearNWorks
+pack (GitHub + Comfy Registry, both frozen at 2024) contains none of them, and
+the Studio README only says "install the pack this server uses". The real
+providers above were traced via ComfyUI Manager's node index, the Comfy Registry,
+and comfy.icu. The Sol-Attn pack deserves special mention: the original
+`Saganaki22/ComfyUI-sol-attn` repository and account were deleted (invisible to
+every search index); `r-vage/ComfyUI-sol-attn` is the maintained continuation
+(found 2026-10-03, repo then 1 day old) carrying the exact
+`MiniMaxH3MemoryEfficientSolAttentionPatch` class. No shim was needed.
+
+### Rebuild from scratch (all unprivileged, github.com is unreachable — use the ghfast.top mirror)
+
+```bash
+H='https://ghfast.top/https://github.com'
+git clone --branch v0.38.2 --depth 1 $H/comfyanonymous/ComfyUI.git /data/work/comfyui
+cd /data/work/comfyui/custom_nodes
+git clone --depth 1 $H/kijai/ComfyUI-KJNodes.git
+git clone --depth 1 $H/Larryvrh/ComfyUI-MiniMax-H3-Turbo.git
+git clone --depth 1 $H/LAOGOU-666/Comfyui-Memory_Cleanup.git
+git clone --depth 1 $H/r-vage/ComfyUI-sol-attn.git
+
+bash nodes/ubuntu-server-node-2/provision/build-comfyui.sh        # build image
+bash nodes/ubuntu-server-node-2/download-comfyui-models.sh        # ~97 GiB from hf-mirror
+```
+
+Model files (exact filenames required by the loader dropdowns; byte sizes and
+source revisions are recorded in `tmp/comfyui/g1-model-sizes.tsv` at download
+time and reproduced in the G1 report):
+
+| File | Directory | Bytes |
+|:---|:---|---:|
+| `minimax_h3_ref2va_int8_convrot.safetensors` | `diffusion_models/` | 34,038,894,550 |
+| `qwen3vl_32b_h3_ultra_uncensored_heretic_int8_convrot.safetensors` | `text_encoders/` | 27,141,342,152 |
+| `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` (§9.2 fallback #2f) | `text_encoders/` | 15,687,142,551 |
+| `minimax_h3_video_vae_fp16.safetensors` | `vae/` | 5,207,808,496 |
+| `minimax_h3_audio_vae_fp32.safetensors` | `vae/` | 605,254,808 |
+| `minimax_h3_turbo_v4_step600_ema.safetensors` | `loras/` | 779,849,816 |
+| `z_image_turbo_bf16.safetensors` | `diffusion_models/` | 12,309,866,400 |
+| `qwen_3_4b.safetensors` | `text_encoders/` | 8,044,982,048 |
+| `ae.safetensors` | `vae/` | 335,304,388 |
+
+### GPU allocation and the stop-ship rule
+
+- Steady state: **SGLang single-card on GPU 0 + ComfyUI on GPU 1**
+  (`profiles/sglang-single.yaml`). The launcher pins `HIP_VISIBLE_DEVICES=1`.
+- **STOP-SHIP**: the `sglang-tp2` profile needs *both* cards. Never run TP2
+  while ComfyUI is up — `serve/comfyui.sh` refuses to start if a TP2 container
+  exists, and you must `bash serve/comfyui.sh stop` before a TP2 run (or stop
+  the LLM before a long generation campaign). animlab's Design flow already
+  sequences "LLM call → unload → ComfyUI generation"; single-card LLM +
+  dedicated ComfyUI card is the steady state.
+- Sunshine also lives on card1 (dummy plug) but only uses the VCN encoder and
+  ~0.15 GB VRAM — no compute contention.
+- Service Hub note: the hub only attributes containers named `sglang-*` to
+  GPUs, so the `comfyui` container does not show up in its per-GPU list.
+
+### Start / stop / logs
+
+```bash
+bash nodes/ubuntu-server-node-2/serve/comfyui.sh          # start (waits for /system_stats)
+bash nodes/ubuntu-server-node-2/serve/comfyui.sh status
+bash nodes/ubuntu-server-node-2/serve/comfyui.sh logs      # docker logs, tees to tmp/comfyui/comfyui.log
+bash nodes/ubuntu-server-node-2/serve/comfyui.sh stop
+```
+
+Endpoint: `http://192.168.50.143:8189` — gates: `GET /system_stats`,
+`GET /object_info`, `GET /history/<prompt_id>`. There is no systemd unit by
+design (service = the docker container; start it after reboot with the line
+above).
+
+### Workflows (AMD-safe variants)
+
+`config/workflows/` holds the two committed API-format graphs:
+
+- `video_minimax_h3_r2v_9image_3audio_3video_amd.json` — upstream H3 workflow
+  with the **`RTXVideoSuperResolution` node deleted** and its chain reconnected
+  (VAEDecode → CreateVideo directly). Consequence: no free 2× upscale; output
+  stays at base resolution (accepted for G1).
+- `Z-Image_Text2Image_for_webui_t2i_api.json` — upstream file, already VSR-free.
+
+The H3 graph hardwires upstream's reference media filenames
+(`h3_product_*.jpg`, `WhatsApp Image 2026-08-14 *.jpeg`, `xxt_mv2_S3.wav`,
+`gp7yg5.mp4`). Those files exist only on the upstream author's machine; the G1
+smoke seeded `/data/work/comfyui/input/` with placeholder files under the same
+names (Studio `example/` images + generated tone/clip). animlab/Studio uploads
+its real media over the same names at G2.
+
+### G1 verification results (2026-10-03)
+
+- torch sees the card and executes gfx1100 kernels in-container
+  (`AMD Radeon RX 7900 XTX`, `gcnArchName gfx1100`, matmul OK;
+  `PYTORCH_ROCM_ARCH` in the image lists gfx1100). **Anomaly:** torch
+  2.13+rocm7.14's `torch.cuda.get_arch_list()` reports only `['gfx942']` even
+  though kernels run — do not treat that API as the arch gate on this stack.
+- `/object_info`: all 33 required node types present, `RTXVideoSuperResolution`
+  absent, zero `IMPORT FAILED`, all loader dropdowns list the exact §5 names.
+- Both workflow graphs resolve with **zero missing node types**.
+- Z-Image smoke: success in **39.46 s** → `output/Z-Image/Z-image_00001_.png`.
+- H3 smoke (0.4 MP per spec §9.4): success in **15:12** (8 steps ≈ 61 s/it)
+  → `output/video/MiniMax_H3_00001_.mp4`, 294 frames @ 24 fps = 12.25 s
+  video **with embedded 12.25 s audio track**. The upstream graph has no
+  standalone WAV writer — audio ships inside the MP4 (spec's "WAV" item
+  satisfied in substance; noted as deviation).
+- **Peak VRAM card1: 25,752,580,096 B = 24.56 GiB (99.98 % of 24 GiB)** —
+  the 31.7 GiB int8 UNET + 25.3 GiB CLIP fit only via ComfyUI's dynamic
+  VRAM streaming; expect first-run JIT (`/data/work/cache/comfyui/comgr`) and
+  ~15 min first generation.
+- LAN latency to `/system_stats` via 192.168.50.143: 2.4–4.6 ms total
+  (loopback-originated; cross-host check from the animlab box still pending).
+- Sol-Attn on AMD: the pack logs `[MiniMax H3 Sol] dense fallback: unsupported
+  SM110` and runs dense attention — graceful, correct output, no sparse speedup.
+  This is the pack's own capability dispatch, not a shim.
+
+### Pitfalls
+
+- **Dual GPU visibility envs zero out the card**: exporting both
+  `ROCR_VISIBLE_DEVICES=1` and `HIP_VISIBLE_DEVICES=1` masks twice (ROCR
+  narrows to [card1], then HIP index 1 no longer exists) → torch dies with
+  "No CUDA GPUs are available". Export **exactly one** (`HIP_VISIBLE_DEVICES`).
+- **`docker run --rm` eats crash logs**: a failing container vanishes with its
+  traceback. The launcher deliberately omits `--rm`; `stop` removes explicitly.
+- **PyPI mirrors flip**: the build broke when tuna lacked
+  `comfyui-workflow-templates-media-assets-02`, then throttled to ~75 kB/s;
+  aliyun was also slow, direct `pypi.org` measured 2.1 MB/s and is now the
+  Dockerfile default (`--build-arg PIP_INDEX=...` to override). Re-measure
+  before trusting any mirror.
+- **Comment lines inside `\` continuations abort the command** — an inline
+  `#` comment between `docker run` lines truncated the argv (bash treats the
+  comment as the end of the logical command).
+- **Bash `$_` in arithmetic**: `$((_ * 3))` expands `$_` = "last argument of
+  the previous command" (`/dev/null`), aborting `wait_ready` right after a
+  successful readiness check — use a named loop variable.
+- **LLM dp1 single-card profile: two ways to kill the server, both fixed
+  2026-10-03** — (a) with EAGLE/MTP on one unsharded card the weights alone are
+  18.18 + 5.53 GiB, so the loader OOMs ("minimum viable = 0.9977"): dp1 must run
+  **without** speculative decoding, which is why its throughput is ~38 tok/s
+  against tp2's ~78. (b) Dropping EAGLE was not enough: `--mem-fraction-static
+  0.96` left only 0.57 GB of *runtime* memory (it bounds weights+KV pool, the
+  remainder is activations/cuda graphs/Triton kernels), the first requests
+  lazy-loaded ~0.38 GB of Triton kernels, and the first long prefill died with
+  `OutOfMemoryError ... 0 bytes is free` inside `_execute_extend` → scheduler
+  SIGQUIT → container gone. dp1 now uses `0.92` + `--chunked-prefill-size
+  2048` + `--max-mamba-cache-size 12` + `--context-length 32768`. A miss here is
+  not a slow request, it is a dead server — see `bench/results/single-card-dp1.txt`.
+
 ## Running Docker without sudo
 
 This node deliberately keeps the **root dockerd** (system service) rather than
@@ -914,16 +1083,21 @@ the patched kernel still require root, by nature.
 ```
 ubuntu-server-node-2/
 ├── README.md, hardware-info.txt, download-model.sh
-├── config/              # Node-level config (models.conf, git, docker registry)
+├── download-comfyui-models.sh   # ComfyUI model set (exact §5 names, resumable)
+├── config/              # Node-level config (models.conf, git, docker registry,
+│   │                    #   workflows/ = committed API graphs incl. AMD variants)
 ├── profiles/            # YAML serve profiles, switched by the Service Hub
 ├── provision/           # OS provisioning (one-shot, root)
 │   ├── install-*.sh, allocate-storage.sh
 │   ├── build-p2p-kernel.sh        # Kernel with the P2PDMA whitelist fix
 │   ├── build-rccl-p2p.sh          # Patched RCCL + derived image
 │   ├── build-sglang-gfx1100.sh    # SGLang gfx1100 fork image
+│   ├── build-comfyui.sh           # ComfyUI service image (deps layer on rocm/pytorch)
 │   └── patches/                   # The four source patches
+├── images/              # Dockerfiles (comfyui/, sglang-gfx1100/)
 ├── serve/               # Container launchers
 │   ├── sglang-tp2.sh              # SGLang TP=2/DP launcher
+│   ├── comfyui.sh                  # ComfyUI on GPU 1, port 8189 (stop-ship guard)
 │   └── patch-mtp-quant-config.sh  # Required model patch before SGLang load
 ├── service-hub/         # Web UI: GPU status + one-click profile switching
 │   ├── deploy.sh, stop.sh         # foreground run / stop
@@ -963,6 +1137,14 @@ ROCm images.
 
 | Date | Issue / Action | Resolution |
 |:---|:---|:---|
+| 2026-10-03 | **ComfyUI G1 service deployed on GPU 1** (spec: animlab `COMFYUI_DEPLOY.md`) | Containerized instead of the spec's venv (user decision — no host ROCm, no python3-venv here, every GPU service on this node is Docker already): image `comfyui-gfx1100:local` on `rocm/pytorch` (torch 2.13.0+rocm7.14.0), ComfyUI `v0.38.2` + 4 node packs pinned, launcher `serve/comfyui.sh` (port 8189, `HIP_VISIBLE_DEVICES=1`, caches under `/data/work/cache/comfyui`), 97 GiB of models via `download-comfyui-models.sh`, AMD workflow variants in `config/workflows/`. G1 gates: 33/33 node types, RTX VSR absent, exact §5 loader names, Z-Image success 39 s, H3 success 15:12 @0.4 MP → 294f/12.25 s MP4 **with audio**, peak VRAM 24.56/24.56 GiB, LAN `/system_stats` 2.4–4.6 ms. Full checklist: `tmp/comfyui/G1_REPORT.md`. |
+| 2026-10-03 | **ComfyUI container fd limit raised (nofile 1024 -> 262144)** (animlab Gate G2: MiniMax H3 text encoding hit `EMFILE` on `/proc/meminfo` via ComfyUI pinned-memory/psutil once model mmaps crossed docker's default soft cap; `serve/comfyui.sh` now passes `--ulimit nofile=262144:262144`, comment kept above the `docker run` continuation chain) |
+| 2026-10-03 | **ComfyUI container died instantly: "No CUDA GPUs are available"** | Root cause was the launcher exporting **both** `ROCR_VISIBLE_DEVICES=1` and `HIP_VISIBLE_DEVICES=1` (pattern copied from `sglang-tp2.sh`, which only survives because it passes symmetric values like `0,1`). ROCR first narrows the device list to `[card1]`, then HIP's index 1 is applied to that already-filtered list where index 1 does not exist → zero devices. Fix: export exactly one (`HIP_VISIBLE_DEVICES` alone verified: count=1, matmul OK). The sglang pattern must not be copied. |
+| 2026-10-03 | First run of the new launcher failed three ways in one go | (1) `docker run --rm` deleted the crashing container **with its traceback** — launcher now omits `--rm`, `stop` removes explicitly; (2) `wait_ready` used `$_` in arithmetic (`$((_ * 3))`), which expands to the previous command's last argument (`/dev/null`) and aborted the script *after* readiness was already confirmed — named loop var now; (3) an inline `#` comment placed inside the `docker run \` continuation truncated argv ("requires at least 1 argument") — comments must sit outside continued commands. All caught by running the script, not by reading it. |
+| 2026-10-03 | Image build broke twice on PyPI mirrors | tuna was missing `comfyui-workflow-templates-media-assets-02` (ComfyUI 0.38's new templates dependency) → hard resolution failure; after switching to aliyun, both mirrors throttled large wheels to ~75 kB/s mid-build (tuna had served 24 MB/s minutes earlier). Direct `files.pythonhosted.org` measured 2.1 MB/s and is now the Dockerfile default with `--build-arg PIP_INDEX=...` as the escape hatch. Supersedes the 09-18 "use tuna" note for image builds — re-measure, mirrors flip. |
+| 2026-10-03 | **The spec's `comfyui_fearnworksnodes` pack does not contain its three nodes** — traced the real providers | Public FearNWorks pack frozen at 2024 (token utilities only; Comfy Registry 0.1.2). Real providers: `MiniMaxH3TurboLoRA` → `Larryvrh/ComfyUI-MiniMax-H3-Turbo`, `VRAM_Debug` → `kijai/ComfyUI-KJNodes`, `RAM/VRAMCleanup` → `LAOGOU-666/Comfyui-Memory_Cleanup`. The last one, `MiniMaxH3MemoryEfficientSolAttentionPatch`, existed nowhere (GitHub/gitee/Sourcegraph/Manager index/Studio repo/its Google Drive runtime/lcz.me thread all negative) until comfy.icu search surfaced `r-vage/ComfyUI-sol-attn` — a **1-day-old continuation of `Saganaki22/ComfyUI-sol-attn`, whose repo and account had been deleted**, which is exactly why every index came up empty. Cloned it; no shim needed. Lesson: an authoritative node-class index (Manager `extension-node-map.json`) proves absence only for *indexed* packs — deleted repos vanish from it too. |
+| 2026-10-03 | H3 smoke: first generation took 15 min at 0.4 MP; VRAM hit 99.98% | The spec-model set (31.7 GiB int8 UNET + 25.3 GiB int8 CLIP) exceeds the 24 GiB card and only fits via ComfyUI's dynamic VRAM streaming; first run also JIT-compiles gfx1100 kernels (`/data/work/cache/comfyui/comgr`). Steady-state expectation: ~61 s/step × 8 steps after warm caches. Peak VRAM 25,752,580,096/25,753,026,560 B — zero headroom, so §9.4's 1.0 MP full validation at animlab G2 is the real risk checkpoint; fallbacks: nvfp4 CLIP (#2f, already downloaded) and pruned fp8 UNET (§9.1). Sol-Attn pack self-disables (`dense fallback: unsupported SM110`) → dense attention, correct output, no sparse speedup on AMD. |
+| 2026-10-03 | LLM `sglang-single` (dp1) no longer starts — pre-existing, user-owned | `ValueError: ... no GPU memory for the KV cache under --mem-fraction-static=0.96 (minimum viable = 0.9977)`: EAGLE/MTP weights now total 18.18 + 5.53 GiB on an unsharded single card (the README's "2.78 GB draft" figure is per-GPU under TP2 sharding), leaving no KV budget. Independent of ComfyUI — the LLM was already down when the G1 work began and card0 stayed idle (139 MB) throughout. User is fixing; G1 report marks the `/v1/models` gate pending. |
 | 2026-09-26 | **Sunshine did not start at boot — `enabled` was a lie** | Symptom: after a reboot the stream host stayed down until someone logged into GNOME, despite `systemctl --user is-enabled sunshine` reporting `enabled`. Cause: the unit was the packaged one, `WantedBy=graphical-session.target`, and that target is only reachable via a desktop login (`gnome-session@ubuntu.target` → `gnome-session.target` → `BindsTo=graphical-session.target`). Lingering started `user@1000.service` at boot but reached only `default.target`, so nothing pulled Sunshine in. Confirmed from the journal: the current boot began 14:38:50, `graphical-session.target` was reached 14:39:20 (a login), and Sunshine only started 14:51:20 — a hand start. In the *previous* boot, with no login, it never started at all. Fix: the repo now owns `sunshine/systemd/sunshine.service` anchored on `WantedBy=default.target` (with `After=graphical-session.target` only — the `Wants=` that briefly accompanied it caused a login lockout, see the entry below). `install.sh` installs that file instead of copying the package's, and removes the stale `graphical-session.target.wants` symlink. Since confirmed at a real reboot — see the "Boot autostart confirmed at a real reboot" entry below. |
 | 2026-09-26 | Nearly shipped the boot fix with capture silently dead — `NoNewPrivileges` vs a file capability | Adding `NoNewPrivileges=true` to the new unit (harmless, and copied from the Service Hub unit where it is correct) stripped `CAP_SYS_ADMIN` that `/usr/bin/sunshine` gets from its **file capability** (`getcap` → `cap_sys_admin=p`). kmsgrab needs it to read the DRM framebuffer, so Sunshine logged `Failed to gain CAP_SYS_ADMIN` → `Unable to initialize capture method` → failed **every** encoder → `Fatal: Unable to find display or encoder during startup`. It still reported `active` and served the Web UI. Caught only by reading the journal rather than trusting `is-active`, since the unit was otherwise correct and the boot-autostart goal was already met. Also worth recording: the `[portalgrab] ... no streams in response` line seen while debugging was a *symptom* of this, not an ordering problem — with the capability restored, KMS resolves `DP-4` normally. `NoNewPrivileges` and `CapabilityBoundingSet` must stay off this unit. |
 | 2026-09-26 | **`Wants=graphical-session.target` broke console login — fixed by the user** | The most damaging change I made, and the one worth remembering. The new unit carried `Wants=graphical-session.target` (reasoning: pull the session in so Sunshine starts after the compositor). On a lingering user manager that target is empty and its `Wants=` job ran at **boot**, leaving it *active with no session behind it*. At the next console login, `gnome-session-init-worker` saw an active graphical session and aborted — `A graphical session is already running!`, then GDM `GdmDisplay: Session never registered, failing`, resetting to the greeter. Effect: **a correct password flashed back to the login screen while a wrong one showed the normal error**, which reads like a PAM/auth fault and misdirects diagnosis entirely. The user removed `Wants=`, keeping only `After=`, and login recovered. Evidence: failure events at 19:17/19:20/19:21/19:25 (7 × `Session never registered`), the fixed unit at 19:45, `graphical-session.target` successfully reached 19:48, and zero occurrences since. Repo unit synced to the user's version and now byte-identical to it. **Rule: a user service on a lingering manager must never pull in targets a session manager owns — order against them (`After=`) only.** Guarded by a `TRAP` comment in the unit and by a new `[FAIL]` check in `sunshine-status.sh`. |

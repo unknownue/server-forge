@@ -1,0 +1,182 @@
+Single-card (dp1) Qwen3.8-27B on ubuntu-server-node-2
+======================================================
+Date     : 2026-10-03
+Node     : ubuntu-server-node-2 (2x RX 7900 XTX, 23.98 GiB each)
+Model    : Qwen3.8-27B-W4A16-AutoRound-GPTQ (W4A16 GPTQ, 18.18 GiB resident)
+Launcher : nodes/ubuntu-server-node-2/serve/sglang-tp2.sh dp1 8080
+Profile  : nodes/ubuntu-server-node-2/profiles/sglang-single.yaml
+Image    : sglang-gfx1100-x99:local
+Verdict  : WORKING — 8/8 checks pass, stable under a 28k-token prefill and
+           two concurrent 16k requests, ComfyUI unaffected on GPU 1.
+
+
+1. Why this profile exists
+--------------------------
+Steady state on this node is "SGLang on GPU 0 + ComfyUI on GPU 1" (see README
+"GPU allocation and the stop-ship rule"). tp2 needs BOTH cards, so it cannot be
+the steady state while ComfyUI is up. dp1 is the profile that serves the model
+on one card and leaves GPU 1 alone.
+
+
+2. Symptom before the fix
+--------------------------
+The profile did not start at all. Two distinct failures, hit in sequence:
+
+  (a) At weight load, with EAGLE/MTP enabled:
+      torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.37 GiB.
+      GPU 0 has a total capacity of 23.98 GiB of which 2.42 GiB is free.
+        .../sglang/srt/models/qwen3_5_mtp.py line 136, ParallelLMHead(...)
+
+      If that allocation had been made, the next check failed anyway:
+      ValueError: Loaded weights leave no GPU memory for the KV cache under
+      --mem-fraction-static=0.96. Raise ... (minimum viable = 0.9977)
+
+  (b) After EAGLE was dropped (first fix attempt, --mem-fraction-static 0.96,
+      --context-length 49152): the server STARTED, passed health, served short
+      requests — then the first long prefill killed it:
+      torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 80.00 MiB.
+      GPU 0 has a total capacity of 23.98 GiB of which 0 bytes is free.
+        ... eager_runner.py _execute_extend -> model.forward ...
+      Scheduler hit an exception -> SIGQUIT -> whole container exits.
+
+      The client sees HTTP 500 "Internal Server Error" and then connection
+      refused; this is a DEAD SERVER, not a failed request.
+
+
+3. Root cause (a): EAGLE/MTP cannot fit on one card
+----------------------------------------------------
+  * The target model alone is 18.18 GiB (measured: "Load weight end ...
+    mem usage=18.18 GB, avail mem=5.62 GB").
+  * EAGLE/MTP adds a second weights head: 18.18 + 5.53 GiB > 23.98 GiB card.
+    (The README's older "2.78 GB draft" figure was PER-GPU under tp2 sharding —
+    tp2 splits it, tp1 does not. That is exactly why the same checkpoint starts
+    on two cards and not on one.)
+  * So --mem-fraction-static can never be small enough: sglang itself computes
+    the minimum viable value as 0.9977, i.e. no KV budget at all.
+
+Fix: dp1 runs WITHOUT speculative decoding. tp2 keeps EAGLE/MTP-3 unchanged
+(verified: the tp2 argument set is byte-identical before/after this change,
+order aside — argparse does not care about order).
+
+
+4. Root cause (b): --mem-fraction-static is not "how much KV you get"
+----------------------------------------------------------------------
+mem-fraction-static bounds weights + KV pool; the REMAINDER is runtime memory
+(activations, cuda graphs, lazily-compiled Triton kernels). Measured at 0.96:
+
+  Load weight end          avail mem = 5.62 GB
+  - mamba (12 slots)               0.95 GB
+  - KV pool (59,016 tokens)        3.60 GB
+  Memory pool end           avail mem = 1.03 GB
+  - cuda graphs                    0.46 GB
+  available_gpu_mem               0.57 GB   <- all the runtime gets
+
+Then the first requests lazy-load Triton kernels, and sglang warns as it goes:
+
+  Triton kernel 'write_req_to_token_pool_triton' device-loaded after serving
+  started (free device mem: 0.52 GiB). Pre-load it during engine init to
+  avoid CUDA OOM.
+  ... repeated ~15 times, down to free device mem: 0.19 GiB
+
+0.19 GB was not enough for one 4096-token prefill chunk -> the 80 MiB request
+failed -> scheduler died. Note the leftover is a formula, not an accident:
+
+  leftover_after_graphs ~= 23.80 * (1 - mem_fraction_static) + 0.10 - 0.46
+  0.96 -> 0.59 GB   0.94 -> 1.07 GB   0.92 -> 1.54 GB   0.90 -> 2.02 GB
+
+There is no pre-load flag to hide this (the hint comes from
+sglang/srt/utils/triton_load_watch.py; grep for a matching server arg finds
+none), so the only lever is to reserve more for runtime.
+
+
+5. Final configuration (dp1 branch of serve/sglang-tp2.sh)
+----------------------------------------------------------
+  --context-length 32768
+  --mem-fraction-static 0.92
+  --max-mamba-cache-size 12
+  --chunked-prefill-size 2048      (default 4096)
+  --max-prefill-tokens 8192        (default 16384)
+  --max-running-requests 2         (shared with tp2)
+  NO --speculative-*
+
+Why each:
+
+  mem-fraction 0.92 -> 1.52 GB runtime at startup, ~1.16 GB after the Triton
+      kernels are resident. Cost: KV pool drops 59,016 -> 43,738 tokens.
+
+  mamba 12 slots -> at 8 slots sglang silently degraded concurrency:
+      "max_running_requests is capped to 1 by the mamba state cache
+       (max_mamba_cache_size=8, 5 state slots per request)"
+      10 slots is the minimum for 2 running requests; 12 leaves one spare.
+      Each slot costs ~0.08 GB of KV (12 slots = conv 0.04 + ssm 0.91 GB),
+      and the state is NOT sharded at tp1 — 48 linear-attention layers.
+
+  chunked-prefill 2048 / max-prefill 8192 -> prefill activation scales with
+      the chunk, and that is exactly where the OOM happened. Halves the peak;
+      decode is unaffected.
+
+  context 32768 -> must stay BELOW the pool (43,738) with headroom for
+      generation and the second running request. A window larger than the pool
+      is a trap: the length check passes, the request queues for pool slots
+      that will never free, and it hangs instead of erroring. 32768 leaves
+      ~11k tokens of headroom; over-long prompts get a clean HTTP 400.
+
+Measured at these settings:
+  Load weight end       18.18 GB used, 5.62 GB avail
+  Mamba Cache           max_mamba_cache_size 12, conv 0.04 + ssm 0.91 GB
+  KV Cache              #tokens 43,738, K 1.33 GB + V 1.33 GB
+  cuda graphs           0.36 GB
+  available_gpu_mem     1.52 GB
+  max_running_requests  2   (not capped — mamba message absent)
+  context_len           32768
+
+
+6. Verification (all 2026-10-03, single card, ComfyUI up on GPU 1)
+-------------------------------------------------------------------
+  1. GET /health_generate                  200
+  2. GET /v1/models                        max_model_len 32768
+  3. Plain chat completion                 "SINGLE CARD OK", reasoning_content
+                                           present (qwen3-thinking split works)
+  4. Tool call (README's curl)             tool_calls populated,
+                                           arguments {"city":"Beijing"},
+                                           finish_reason tool_calls,
+                                           NO raw <tool_call> XML in content
+                                           (qwen3_coder parser works)
+  5. Two parallel completions              200 + 200 in 3 s
+  6. Long prompt, 28,062 tokens            200  (this request KILLED the
+                                           server before the fix)
+  7. Over-length, 800,052 tokens           400 "longer than the model's
+                                           context length (32768)"
+  8. Stress: 2 x 16,062-token prompts      200 + 200 in 19 s, combined
+      in parallel                           32,124 tokens < 43,738 pool,
+                                            health still 200 afterwards,
+                                            0 OOM lines in the log
+  9. Streaming (SSE)                       deltas flow, finish_reason delivered
+ 10. Service Hub /api/profiles/sglang-single   running true, healthy true
+ 11. GPU isolation                         card0 25.70 GB used (LLM),
+                                            card1 6.95 GB (ComfyUI),
+                                            /system_stats 200 — unaffected
+
+Throughput (non-streaming usage.completion_tokens / wall, 3 runs):
+  137 tok / 3.6 s = 37.6 tok/s
+  112 tok / 3.0 s = 37.8 tok/s
+  114 tok / 3.0 s = 37.8 tok/s
+  ~37.7 tok/s end-to-end vs tp2's 77.7 — expected: no MTP speculative decode
+  and one card instead of two. Startup to ready: ~60 s (11.3 s weight load).
+
+
+7. Operational notes
+--------------------
+  * `docker run --rm` was REMOVED from the launcher. A scheduler OOM kills the
+    container, and --rm deleted the container together with the only copy of the
+    traceback — this cost a full debug cycle on 2026-10-03 (the ComfyUI
+    launcher had already learned the same lesson). `stop_existing` cleans the
+    leftover container on the next start; `docker rm -f` on stop.
+  * Crash signature to recognise: HTTP 500 "Internal Server Error" followed by
+    connection refused on :8080 = scheduler died, not a bad request. Check
+    `docker logs sglang-tp2-gpu0` for "Scheduler hit an exception".
+  * Do NOT raise --mem-fraction-static back toward 0.96 without re-running the
+    28k-token prefill test: the leftover shrinks ~0.24 GB per 0.01, and the
+    failure mode is a dead server, not a slow request.
+  * tp2 is unaffected: same argument set as before this change (verified by
+    set-comparison), still needs both cards, still requires ComfyUI stopped.

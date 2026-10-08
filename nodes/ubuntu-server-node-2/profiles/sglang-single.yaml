@@ -1,12 +1,15 @@
-# Single-GPU profile: leaves GPU 1 free for other work (e.g. a second model or a
-# benchmark run) while still serving Qwen3.8-27B on GPU 0.
+# Single-GPU profile: leaves one card free for other work (e.g. ComfyUI or a
+# benchmark run) while still serving Qwen3.8-27B on a single GPU.
 name: sglang-single
-description: "Qwen3.8-27B on GPU 0 only, GPU 1 left free"
+description: "Qwen3.8-27B on one GPU (freest card), the other left free"
 version: "1.0"
 
 gpu_allocation:
   - role: llm
-    gpu: [0]
+    # auto = the hub picks the GPU with the most free VRAM at start time and
+    # exports SERVICE_HUB_GPU to the launcher (card 0 in the steady state,
+    # since ComfyUI holds card 1).
+    gpu: auto
     model: Qwen3.8-27B-W4A16-AutoRound-GPTQ
     note: "single GPU, :8080"
 
@@ -14,10 +17,21 @@ services:
   - name: sglang-single
     script: serve/sglang-tp2.sh
     args: ["dp1", "8080"]
+    gpu: auto
     health: http://localhost:8080/health_generate
-    container_prefix: sglang-tp2
+    # dp1 containers are named sglang-tp2-gpu<id> (id = placement card).
+    # Narrower than "sglang-tp2" on purpose: docker's name filter is a
+    # substring match, so the shared prefix would report BOTH sglang profiles
+    # as running whenever either is up.
+    container_prefix: sglang-tp2-gpu
 
+# TP=2 owns both cards, so it must go before this profile can start (declared
+# on the tp2 side as well — conflicts are read symmetrically either way).
+conflicts:
+  - sglang-tp2
+
+# Only this profile's own containers: stopping sglang-single must not remove
+# a tp2 container (the conflict-aware switch handles that via `conflicts`).
 stop_containers:
-  - sglang-tp2-tp2
   - sglang-tp2-gpu0
   - sglang-tp2-gpu1

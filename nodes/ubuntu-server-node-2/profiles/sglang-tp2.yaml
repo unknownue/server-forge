@@ -19,10 +19,19 @@ services:
     script: serve/sglang-tp2.sh
     args: ["tp2", "8080"]
     health: http://localhost:8080/health_generate
-    container_prefix: sglang-tp2
+    # The tp2 launcher names its container sglang-tp2-tp2 — narrow prefix so
+    # the dp1 containers (sglang-tp2-gpu<id>) are not attributed to this
+    # profile (docker's name filter is a substring match).
+    container_prefix: sglang-tp2-tp2
 
-# Containers removed before switching to this profile.
+# Containers removed before switching to this profile. `conflicts` is what the
+# conflict-aware switch keys on: TP=2 needs the card each single-card profile
+# occupies, so both must yield — their containers are removed through their own
+# profiles' stop lists when the conflict set is built. Conflicts are read
+# symmetrically; one side would suffice, both sides are kept for clarity.
+conflicts:
+  - sglang-single
+  - comfyui
+
 stop_containers:
   - sglang-tp2-tp2
-  - sglang-tp2-gpu0
-  - sglang-tp2-gpu1

@@ -34,10 +34,17 @@ export interface ServiceInfo {
   name: string
   script: string
   args: string[]
+  // Placement hint from the profile YAML: 'auto' (freest GPU at start time),
+  // a pinned id list like '0,1', or null (serve script pins its own devices).
+  gpu: string | null
+  // Service port — explicit `port:` field, else derived from the health URL.
+  port: number | null
   health: string | null
   container_prefix: string | null
   running: boolean
   healthy: boolean
+  // Live host GPU indices the running container was started with.
+  assigned_gpus: number[]
 }
 
 export interface ProfileInfo {
@@ -55,12 +62,17 @@ export interface ProfileDetail {
   gpu_allocation: Array<Record<string, any>>
   services: ServiceInfo[]
   stop_containers: string[]
+  // Profiles that must yield their GPUs before this one can start.
+  conflicts: string[]
 }
 
 export interface CurrentProfile {
   profile: string | null
   last_switch_at: string | null
   status: string
+  // Profiles with running containers right now — single-card profiles
+  // coexist, so `profile` (last switch) alone cannot say what is up.
+  active_profiles: string[]
 }
 
 export interface SwitchResult {
@@ -68,6 +80,8 @@ export interface SwitchResult {
   profile: string | null
   stopped_containers: string[]
   started_containers: string[]
+  // Where each service was placed, e.g. ['sglang-single->GPU1'].
+  placements: string[]
   elapsed_seconds: number
   error: string | null
 }
@@ -105,8 +119,14 @@ export const api = {
   profile: (name: string) => req<ProfileDetail>(`/api/profiles/${encodeURIComponent(name)}`),
   current: () => req<CurrentProfile>('/api/current'),
   history: () => req<{ history: any[] }>('/api/history'),
-  switch: (name: string) =>
-    req<SwitchResult>(`/api/switch/${encodeURIComponent(name)}`, { method: 'POST' }),
+  // `gpu` picks the card for single-card services ('auto'/undefined = freest
+  // GPU at start time, '1' = GPU 1, '1,0' = one id per single-card service).
+  switch: (name: string, gpu?: string | null) => {
+    const q = gpu && gpu !== 'auto' ? `?gpu=${encodeURIComponent(gpu)}` : ''
+    return req<SwitchResult>(`/api/switch/${encodeURIComponent(name)}${q}`, { method: 'POST' })
+  },
   stop: () => req<StopResult>('/api/stop', { method: 'POST' }),
+  stopProfile: (name: string) =>
+    req<StopResult>(`/api/profiles/${encodeURIComponent(name)}/stop`, { method: 'POST' }),
   health: () => req<{ status: string }>('/api/health'),
 }

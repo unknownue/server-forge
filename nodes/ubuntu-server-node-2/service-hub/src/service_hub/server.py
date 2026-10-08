@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,11 +30,13 @@ from .models import (
     SwitchResult,
 )
 from .profile_executor import (
+    get_active_profiles,
     get_p2p_status,
     load_profiles,
     load_state,
     populate_service_state,
     stop_all,
+    stop_profile,
     switch_in_progress,
     switch_profile,
 )
@@ -143,6 +146,16 @@ async def p2p_status():
 # Profiles
 # ═══════════════════════════════════════════════════════════════════════
 
+def _alloc_gpu_count(alloc: dict) -> int:
+    """GPUs an allocation entry claims — `gpu` may be a list or the string "auto"."""
+    gpu = alloc.get("gpu", [])
+    if isinstance(gpu, str):
+        return 1 if gpu.lower() == "auto" else len([x for x in gpu.split(",") if x])
+    if isinstance(gpu, list):
+        return len(gpu)
+    return 0
+
+
 @app.get("/api/profiles", response_model=ProfileListResponse, tags=[TAG_PROFILE],
          summary="List all profiles")
 async def list_profiles():
@@ -151,7 +164,7 @@ async def list_profiles():
         roles, gpu_count = set(), 0
         for alloc in p.gpu_allocation:
             roles.add(alloc.get("role", "unknown"))
-            gpu_count += len(alloc.get("gpu", []))
+            gpu_count += _alloc_gpu_count(alloc)
         infos.append(ProfileInfo(
             name=p.name, description=p.description, version=p.version,
             gpu_count=gpu_count, roles=sorted(roles),
@@ -176,10 +189,12 @@ async def get_profile(name: str):
          summary="Get active profile")
 async def get_current():
     state = load_state()
+    active = await get_active_profiles(load_profiles())
     return CurrentProfileResponse(
         profile=state.get("current_profile"),
         last_switch_at=state.get("last_switch_at"),
-        status="active" if state.get("current_profile") else "idle",
+        status="active" if active else "idle",
+        active_profiles=active,
     )
 
 
@@ -190,11 +205,23 @@ async def get_history():
 
 @app.post("/api/switch/{name}", response_model=SwitchResult, tags=[TAG_SERVICE],
           summary="Switch profile")
-async def switch_to(name: str, force: bool = Query(False)):
-    """Stop all managed containers, then start the named profile.
+async def switch_to(name: str, force: bool = Query(False),
+                    gpu: Optional[str] = Query(None)):
+    """Start the named profile, stopping only what conflicts with it.
 
     Blocking: serving takes a minute or more to become healthy, and the request
     returns only once the profile's services have been launched.
+
+    Conflict-aware: coexisting profiles (no GPU conflict declared between them)
+    keep running, so single-card services compose. Single-card services are
+    placed on the freest GPU and launched sequentially. Use `/api/stop` to stop
+    everything regardless of conflicts.
+
+    `gpu` picks the card for the profile's single-card services ("auto"/omitted
+    = freest GPU; "1" = GPU 1; "1,0" = one id per single-card service, in
+    service order). A pick on a card a coexisting profile already uses is
+    refused with 409 unless `force=true`. Only services whose profile `gpu`
+    hint is `auto` or a single id are selectable.
     """
     profiles = load_profiles()
     if name not in profiles:
@@ -206,13 +233,19 @@ async def switch_to(name: str, force: bool = Query(False)):
         raise HTTPException(status_code=409,
                             detail="Another switch or stop is already in progress.")
 
-    logger.info("Switch request -> %s (force=%s)", name, force)
-    status, stopped, started, elapsed, error = await switch_profile(name, profiles, force=force)
+    logger.info("Switch request -> %s (force=%s, gpu=%s)", name, force, gpu)
+    status, stopped, started, placements, elapsed, error = await switch_profile(
+        name, profiles, force=force, gpu=gpu)
     if status == "error":
         raise HTTPException(status_code=500, detail=error)
+    if status == "invalid":
+        raise HTTPException(status_code=400, detail=error)
+    if status == "conflict":
+        raise HTTPException(status_code=409, detail=error)
     return SwitchResult(
         status=status, profile=name, stopped_containers=stopped,
-        started_containers=started, elapsed_seconds=round(elapsed, 1),
+        started_containers=started, placements=placements,
+        elapsed_seconds=round(elapsed, 1),
     )
 
 
@@ -222,6 +255,31 @@ async def stop_services():
     stopped, elapsed, error = await stop_all(load_profiles())
     if error:
         return StopResult(status="error", stopped_containers=[], elapsed_seconds=elapsed, error=error)
+    return StopResult(status="success", stopped_containers=stopped,
+                      elapsed_seconds=round(elapsed, 1))
+
+
+@app.post("/api/profiles/{name}/stop", response_model=StopResult, tags=[TAG_SERVICE],
+          summary="Stop one profile")
+async def stop_one(name: str):
+    """Stop only this profile's containers — coexisting profiles keep running.
+
+    The "off" half of an independent toggle (e.g. take ComfyUI down without
+    touching the single-card LLM). `/api/stop` remains the stop-everything.
+    """
+    profiles = load_profiles()
+    if name not in profiles:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Profile '{name}' not found. Available: {', '.join(profiles)}",
+        )
+    if switch_in_progress():
+        raise HTTPException(status_code=409,
+                            detail="Another switch or stop is already in progress.")
+
+    stopped, elapsed, error = await stop_profile(name, profiles)
+    if error:
+        raise HTTPException(status_code=500, detail=error)
     return StopResult(status="success", stopped_containers=stopped,
                       elapsed_seconds=round(elapsed, 1))
 

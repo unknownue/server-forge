@@ -47,13 +47,25 @@ async function loadStatic() {
   } catch { /* non-fatal */ }
 }
 
-async function doSwitch(name: string) {
+// `gpu` is the card chosen in the profile's selector ('auto'/undefined = let
+// placement pick the freest card). The chosen card and the service ports are
+// echoed in the log — a started service must say where it listens.
+async function doSwitch(name: string, gpu?: string) {
   busy.value = name
-  log(`Starting profile "${name}" — this can take a few minutes…`)
+  const ports = (details.value[name]?.services ?? [])
+    .map((s) => s.port)
+    .filter((p): p is number => p != null)
+  log(
+    `Starting profile "${name}" on GPU ${gpu && gpu !== 'auto' ? gpu : 'auto'}` +
+      (ports.length ? ` — port ${ports.join(', ')}` : '') +
+      ' — this can take a few minutes…',
+  )
   try {
-    const r = await api.switch(name)
+    const r = await api.switch(name, gpu)
     log(
       `Profile "${r.profile}" started in ${r.elapsed_seconds}s` +
+        (r.placements.length ? ` — ${r.placements.join(', ')}` : '') +
+        (ports.length ? ` — listening on ${ports.map((p) => ':' + p).join(', ')}` : '') +
         (r.stopped_containers.length ? ` (stopped: ${r.stopped_containers.join(', ')})` : ''),
       'ok',
     )
@@ -74,6 +86,27 @@ async function doStop() {
     log(`Stopped ${r.stopped_containers.length} container(s) in ${r.elapsed_seconds}s`, 'ok')
   } catch (e: any) {
     log(`Stop failed: ${e.message ?? e}`, 'err')
+  } finally {
+    busy.value = null
+    await refresh()
+    await loadStatic()
+  }
+}
+
+// Stop ONE profile — coexisting single-card profiles keep running (e.g. take
+// ComfyUI down without touching the LLM). Distinct from Stop all above.
+async function doStopProfile(name: string) {
+  busy.value = `stop:${name}`
+  log(`Stopping profile "${name}" (other profiles keep running)…`)
+  try {
+    const r = await api.stopProfile(name)
+    log(
+      `Profile "${name}" stopped in ${r.elapsed_seconds}s` +
+        (r.stopped_containers.length ? ` (${r.stopped_containers.join(', ')})` : ' — nothing was running'),
+      'ok',
+    )
+  } catch (e: any) {
+    log(`Stop "${name}" failed: ${e.message ?? e}`, 'err')
   } finally {
     busy.value = null
     await refresh()
@@ -132,9 +165,11 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
         <ProfileList
           :profiles="profiles"
           :details="details"
+          :gpus="gpus"
           :current="current"
           :busy="busy"
           @switch="doSwitch"
+          @stop="doStopProfile"
         />
       </div>
 

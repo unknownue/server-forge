@@ -114,11 +114,12 @@ This stops only the hub. Containers it launched keep running — use the UI's
 | `GET` | `/api/gpu-history` | 1-hour VRAM/utilization history (30 s samples) |
 | `GET` | `/api/p2p` | Dual-GPU peer-access status |
 | `GET` | `/api/profiles` | List profiles |
-| `GET` | `/api/profiles/{name}` | Profile detail + live service state |
-| `GET` | `/api/current` | Active profile |
-| `POST` | `/api/switch/{name}` | Stop everything, then start this profile |
+| `GET` | `/api/profiles/{name}` | Profile detail + live service state (incl. assigned GPUs) |
+| `POST` | `/api/profiles/{name}/stop` | Stop ONE profile; coexisting profiles keep running |
+| `GET` | `/api/current` | Last switch + `active_profiles` (live, from containers) |
+| `POST` | `/api/switch/{name}` | Stop what conflicts with this profile, then start it; `?gpu=` picks the card |
 | `POST` | `/api/stop` | Stop all managed containers |
-| `GET` | `/api/history` | Switch history |
+| `GET` | `/api/history` | Switch history (includes GPU placement) |
 | `GET` | `/api/health` | Hub health check |
 
 Interactive docs: <http://localhost:9090/docs>
@@ -126,6 +127,29 @@ Interactive docs: <http://localhost:9090/docs>
 `POST /api/switch/{name}` blocks until the profile's services are launched and
 reports elapsed time. A switch holds a lock, so concurrent requests get `409`
 rather than two servers racing for the same GPUs.
+
+**Choosing the GPU (`?gpu=`):** single-card services (a `gpu` hint of `auto` or
+one explicit id) accept an explicit card choice —
+`POST /api/switch/sglang-single?gpu=0` starts on GPU 0 instead of the freest
+card. `gpu=auto`, or omitting the parameter, keeps the default placement;
+profiles with several single-card services take one id per service in service
+order (`gpu=1,0`). Multi-card services (TP=2) and script-pinned ones are not
+selectable and answer `400`. A pick on a card a coexisting profile is already
+using is refused with `409` — two model servers on one 24 GB card OOM each
+other — and `?force=true` overrides that check and nothing else. Bad ids or
+id counts also answer `400`, and all validation runs *before* anything is
+stopped, so a typo cannot take a running service down. The response's
+`placements` lists where each service actually landed. The UI offers the same
+choice as a per-profile GPU dropdown next to Start (options show free VRAM and
+whether the card is in use).
+
+**Switch is conflict-aware, not "stop the world":** it removes the containers
+of the profiles in the target's `conflicts` (and of the target itself, for a
+clean restart) and leaves everything else alone. That is what lets two
+single-card profiles coexist — the steady state is `sglang-single` + `comfyui`
+running together, and switching to either keeps the other up. `POST /api/stop`
+is still the stop-everything; `POST /api/profiles/{name}/stop` is the
+per-profile "off" button.
 
 ## Profiles
 
@@ -135,7 +159,26 @@ node1), not inside `service-hub/`.
 | Profile | GPUs | Description |
 |---------|------|-------------|
 | `sglang-tp2` | 0,1 | Qwen3.8-27B, TP=2 + MTP-3 — the reproduced topic-1532 config |
-| `sglang-single` | 0 | One instance on GPU 0, GPU 1 left free |
+| `sglang-single` | auto (1) | One instance on the freest card, the other left free |
+| `comfyui` | auto (1) | MiniMax H3 / Z-Image generation, `:8189` |
+
+Conflicts: `sglang-tp2` ↔ (`sglang-single`, `comfyui`) — TP=2 needs both cards.
+The two single-card profiles do **not** conflict with each other, so they
+compose: switching to one never stops the other. Conflicts are read
+symmetrically, so declaring `conflicts:` on either side (or both) is enough.
+
+**Single-card placement (`gpu: auto`):** at start time the hub reads free VRAM
+from sysfs and gives each `auto` service the freest card not already reserved
+earlier in the same start — services are launched **one after another**, so the
+second one naturally lands on the other card. The pick is exported as
+`SERVICE_HUB_GPU=<id>` (serve scripts honor it over their own defaults),
+recorded in the switch history as `placement: <svc>->GPU<n>`, and shown live
+per service (`assigned_gpus`) in the UI. Ties break by the stable PCI-ordered
+GPU index, so placement is deterministic. Model loading takes minutes, so free
+VRAM would not reflect the previous pick between starts — the in-run reservation
+set is what keeps two services off the same card. The user can override the
+pick per start (`?gpu=`, or the UI's GPU dropdown) — see **Choosing the GPU**
+in the API section.
 
 There is no two-instance (data-parallel) profile. Splitting per GPU would need
 each card to hold the whole 19 GB checkpoint, which does not fit alongside the
@@ -143,8 +186,12 @@ KV and mamba state on a 24 GB card — the containers exit during startup. TP=2
 works precisely because sharding halves the per-card weights. Full analysis in
 `bench/results/tp2-vs-dp2.txt`.
 
-`stop_containers` in each profile lists every container a switch should remove,
-so switching profiles never leaves an old server holding VRAM.
+`stop_containers` in each profile lists that profile's own containers, and the
+live prefix scan (each service's `container_prefix`) catches name variants the
+static list predates — e.g. a dp1 container re-placed onto the other card is
+still `sglang-tp2-gpu*`. Managed-container detection is derived entirely from
+profiles: there is no hardcoded name pattern left in the backend, so adding a
+profile also makes its containers show up per GPU and respond to Stop all.
 
 ### Adding a profile
 
@@ -157,8 +204,8 @@ description: "..."
 version: "1.0"
 
 gpu_allocation:
-  - role: llm
-    gpu: [0, 1]
+  - role: llm            # or image-gen, benchmark, ...
+    gpu: auto            # fixed list ([0, 1]) also allowed, for display
     model: Some-Model
     note: "..."
 
@@ -166,12 +213,32 @@ services:
   - name: my-service
     script: serve/sglang-tp2.sh      # path relative to the node directory
     args: ["tp2", "8080"]
+    gpu: auto                        # freest-card placement, or "0,1"; omit
+                                     # entirely to let the script pin devices
+    port: 8080                       # optional — derived from the health URL
+                                     # below when omitted
     health: http://localhost:8080/health_generate
-    container_prefix: sglang-tp2
+    container_prefix: sglang-tp2-tp2 # prefix for run-state + container scans
 
+# Profiles that must yield their GPUs first (read symmetrically).
+conflicts:
+  - sglang-tp2
+
+# This profile's own containers, removed by a switch/stop of this profile.
 stop_containers:
-  - sglang-tp2-tp2
+  - my-service-1
 ```
+
+The serve script must honor `SERVICE_HUB_GPU` for `gpu: auto` to have any
+effect — see `GPU="${SERVICE_HUB_GPU:-...}"` in `serve/comfyui.sh` and the
+`dp1` branch of `serve/sglang-tp2.sh`.
+
+**Ports are always shown as text.** Every service displays a `port NNNN` pill
+next to its state — the port comes from the profile's `port:` field, or from
+the health URL when that is omitted. While the service is running the pill is
+a link to `http://<host>:<port>/`, and the activity log states the port both
+when the start begins and when it completes ("listening on :8080"). A started
+service should never leave the user guessing where it listens.
 
 ## Frontend development
 
@@ -192,7 +259,9 @@ npm run build   # writes ../static
 
 - **Container detection** relies on `ROCR_VISIBLE_DEVICES` / `HIP_VISIBLE_DEVICES`,
   since ROCm containers have no `--gpus` equivalent without the NVIDIA toolkit.
-  Only containers named `sglang-*` are attributed to GPUs.
+  Which containers count as managed is derived from the profiles' service
+  `container_prefix` values (fallback: `sglang-`, `comfyui`) — nothing is
+  hardcoded to a specific service name.
 - **GPU order is by PCI slot** (`0000:05:00.0` then `0000:08:00.0`), so indices
   stay stable across reboots — profiles and `ROCR_VISIBLE_DEVICES` refer to them.
 - `deploy.sh` runs uvicorn in the foreground; use a background job or a terminal

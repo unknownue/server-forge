@@ -26,8 +26,32 @@ DRM_ROOT = Path("/sys/class/drm")
 # AMD vendor id; used to skip non-AMD display devices.
 AMD_VENDOR = "0x1002"
 
-# Containers whose names start with these prefixes are the ones this hub manages.
-MANAGED_CONTAINER_PREFIXES = ("sglang-",)
+# Fallback container-name prefixes, used only when the profile directory cannot
+# be read. Normally the managed set is derived from the profiles themselves
+# (each service's container_prefix), so adding a profile is enough to make the
+# hub see its containers.
+FALLBACK_MANAGED_PREFIXES = ("sglang-", "comfyui")
+
+
+def managed_prefixes() -> tuple[str, ...]:
+    """Container-name prefixes this hub manages, derived from profiles.
+
+    Deferred import: profile_executor imports this module for GPU placement,
+    so the reverse dependency must not be evaluated at module load time.
+    """
+    try:
+        from .profile_executor import load_profiles  # noqa: PLC0415
+
+        prefixes = {
+            svc.container_prefix or svc.name
+            for p in load_profiles().values()
+            for svc in p.services
+        }
+        if prefixes:
+            return tuple(sorted(prefixes))
+    except Exception as e:  # profiles dir missing/unreadable — fall back
+        logger.warning("Could not derive managed prefixes from profiles: %s", e)
+    return FALLBACK_MANAGED_PREFIXES
 
 
 def _run(cmd: list[str], timeout: int = 10) -> tuple[int, str, str]:
@@ -135,6 +159,9 @@ def get_managed_containers() -> dict[int, list[ContainerInfo]]:
         return {}
 
     result: dict[int, list[ContainerInfo]] = {}
+    # Derived once per scan — this parses every profile YAML, and the loop can
+    # see many containers.
+    prefixes = managed_prefixes()
 
     for line in out.strip().splitlines():
         if not line.strip():
@@ -144,7 +171,7 @@ def get_managed_containers() -> dict[int, list[ContainerInfo]]:
             continue
         name, image, ports_str, status = parts[0], parts[1], parts[2], parts[3]
 
-        if not name.startswith(MANAGED_CONTAINER_PREFIXES):
+        if not name.startswith(prefixes):
             continue
 
         rc2, env_out, _ = _run([
@@ -191,6 +218,48 @@ def get_managed_containers() -> dict[int, list[ContainerInfo]]:
             result.setdefault(gid, []).append(info)
 
     return result
+
+
+def gpu_free_vram() -> dict[int, int]:
+    """{gpu_id: free MiB} straight from sysfs, in stable PCI-slot order.
+
+    Used by the profile executor to place single-card services on the freest
+    card at start time. sysfs only — no docker calls, so it stays cheap enough
+    to consult between service starts.
+    """
+    free: dict[int, int] = {}
+    for gpu_id, (_card, dev) in enumerate(_gpu_cards()):
+        total = _read_int(dev / "mem_info_vram_total") or 0
+        used = _read_int(dev / "mem_info_vram_used") or 0
+        free[gpu_id] = max(total - used, 0) // (1024 * 1024)
+    return free
+
+
+def container_visible_gpus(name: str) -> list[int]:
+    """Host GPU indices a running container was started with ([] if unknown).
+
+    ROCm containers mask devices via ROCR_VISIBLE_DEVICES /
+    HIP_VISIBLE_DEVICES (no --gpus equivalent without the NVIDIA toolkit),
+    and both hold *host* indices — which is exactly what placement records.
+    """
+    rc, env_out, _ = _run([
+        "docker", "inspect", "--format",
+        "{{range .Config.Env}}{{println .}}{{end}}", name,
+    ])
+    if rc != 0:
+        return []
+    env = {}
+    for line in env_out.strip().splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            env[k] = v
+    raw = env.get("ROCR_VISIBLE_DEVICES") or env.get("HIP_VISIBLE_DEVICES")
+    if raw is None:
+        return []
+    try:
+        return [int(d.strip()) for d in raw.split(",") if d.strip()]
+    except ValueError:
+        return []
 
 
 def get_all_gpu_status(current_profile: Optional[str] = None) -> list[GPUStatus]:

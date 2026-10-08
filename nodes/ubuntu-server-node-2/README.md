@@ -847,10 +847,26 @@ bash nodes/ubuntu-server-node-2/service-hub/deploy.sh   # http://localhost:9090/
 bash nodes/ubuntu-server-node-2/service-hub/stop.sh     # stops the hub only
 ```
 
-Profiles live in `profiles/` (`sglang-tp2`, `sglang-single`) and are re-read on
-every request, so adding a YAML file needs no restart. Switching stops
-all managed containers first, then starts the target profile and waits until its
-health endpoint answers.
+Profiles live in `profiles/` (`sglang-tp2`, `sglang-single`, `comfyui`) and are
+re-read on every request, so adding a YAML file needs no restart. Three rules
+shape how they start:
+
+- **Conflict-aware switching.** A switch stops only the profiles the target
+  conflicts with (`conflicts:` in the YAML, read symmetrically), then starts
+  the target and waits for its health endpoint. Unrelated single-card profiles
+  keep running — that is what makes the steady state composable from the UI.
+  `Stop all` remains the stop-everything button; each profile also has its own
+  `Stop` (API: `POST /api/profiles/{name}/stop`) for independent toggling.
+- **Single-card services are placed by freeness.** A service with `gpu: auto`
+  goes to the GPU with the most free VRAM at start time; services start one
+  after another, each taking the then-freest unassigned card (the hub exports
+  `SERVICE_HUB_GPU=<id>`, which the serve scripts honor over their defaults).
+  The chosen card is recorded in the switch history and shown per service in
+  the UI.
+- **Managed containers are derived from profiles.** GPU attribution, stop, and
+  prefix scans all key off each service's `container_prefix` — there is no
+  hardcoded `sglang-*` anywhere anymore, so a new profile's containers are
+  visible and stoppable without touching backend code.
 
 Two things are AMD-specific versus node1's hub:
 
@@ -941,8 +957,13 @@ time and reproduced in the G1 report):
   dedicated ComfyUI card is the steady state.
 - Sunshine also lives on card1 (dummy plug) but only uses the VCN encoder and
   ~0.15 GB VRAM — no compute contention.
-- Service Hub note: the hub only attributes containers named `sglang-*` to
-  GPUs, so the `comfyui` container does not show up in its per-GPU list.
+- Service Hub note: ComfyUI is a first-class profile (`profiles/comfyui.yaml`,
+  `gpu: auto`, conflicts with `sglang-tp2` only), so the hub shows its container
+  on the per-GPU list, starts/stops it from the UI, and leaves it running when
+  switching to `sglang-single` — the two singles compose. Card choice is
+  freeness-based at start time (card 1 in the steady state, since card 0 holds
+  the LLM); the launcher's default of `HIP_VISIBLE_DEVICES=1` applies only to
+  hand-run launches.
 
 ### Start / stop / logs
 
@@ -957,6 +978,19 @@ Endpoint: `http://192.168.50.143:8189` — gates: `GET /system_stats`,
 `GET /object_info`, `GET /history/<prompt_id>`. There is no systemd unit by
 design (service = the docker container; start it after reboot with the line
 above).
+
+#### Native variant — removed (2026-10-08)
+
+Docker is the **only** variant (user decision 2026-10-08). The 2026-10-05
+native dev variant is gone: `serve/comfyui-native.sh`, the uv-built venv
+`/data/work/comfyui/.venv` (~24 GiB), the uv download cache `~/.cache/uv`
+(~76 GiB), and the tmp records (`comfyui-native.log`, `comfyui-native.pid`,
+`image-freeze-2026-10-05.txt`). The shared warm JIT caches under
+`/data/work/cache/comfyui` (comgr/triton/torchinductor/hf) stay — the container
+mounts them. To edit ComfyUI or custom-node code: edit `/data/work/comfyui`
+and restart the container; dependency changes go through
+`provision/build-comfyui.sh` (image rebuild). Do not reintroduce a
+host-process launcher. See the maintenance log for the full record.
 
 ### Workflows (AMD-safe variants)
 
@@ -1006,7 +1040,20 @@ its real media over the same names at G2.
 - **Dual GPU visibility envs zero out the card**: exporting both
   `ROCR_VISIBLE_DEVICES=1` and `HIP_VISIBLE_DEVICES=1` masks twice (ROCR
   narrows to [card1], then HIP index 1 no longer exists) → torch dies with
-  "No CUDA GPUs are available". Export **exactly one** (`HIP_VISIBLE_DEVICES`).
+  "No CUDA GPUs are available" (sglang: "No accelerator (CUDA, XPU, HPU, NPU,
+  MUSA, MPS) or platform plugin is available"). Export **exactly one**
+  (`HIP_VISIBLE_DEVICES`). This bit twice: found in `serve/comfyui.sh` on
+  2026-10-03, then again in `serve/sglang-tp2.sh` on 2026-10-08 — the pattern
+  was copied FROM the sglang launcher, which only ever survived because it
+  passed symmetric values (`0` and `0,1`, where mask == renumbered index). Any
+  nonzero singleton index reproduces it; both launchers now export
+  `HIP_VISIBLE_DEVICES` only.
+- **A readiness poll against a dead container looks like a 30-minute hang**:
+  `wait_ready` curled the port for the full 1800 s while the container had
+  exited seconds after start — and because the Service Hub holds its switch
+  lock while the launcher runs, the hub rejected every retry with "Another
+  switch or stop is already in progress". Check the container's running state
+  on each poll iteration and bail out with the log tail.
 - **`docker run --rm` eats crash logs**: a failing container vanishes with its
   traceback. The launcher deliberately omits `--rm`; `stop` removes explicitly.
 - **PyPI mirrors flip**: the build broke when tuna lacked
@@ -1086,7 +1133,8 @@ ubuntu-server-node-2/
 ├── download-comfyui-models.sh   # ComfyUI model set (exact §5 names, resumable)
 ├── config/              # Node-level config (models.conf, git, docker registry,
 │   │                    #   workflows/ = committed API graphs incl. AMD variants)
-├── profiles/            # YAML serve profiles, switched by the Service Hub
+├── profiles/            # YAML serve profiles (tp2 / single / comfyui),
+│   │                    #   auto-GPU placement + conflict-aware switching
 ├── provision/           # OS provisioning (one-shot, root)
 │   ├── install-*.sh, allocate-storage.sh
 │   ├── build-p2p-kernel.sh        # Kernel with the P2PDMA whitelist fix
@@ -1096,8 +1144,8 @@ ubuntu-server-node-2/
 │   └── patches/                   # The four source patches
 ├── images/              # Dockerfiles (comfyui/, sglang-gfx1100/)
 ├── serve/               # Container launchers
-│   ├── sglang-tp2.sh              # SGLang TP=2/DP launcher
-│   ├── comfyui.sh                  # ComfyUI on GPU 1, port 8189 (stop-ship guard)
+│   ├── sglang-tp2.sh              # SGLang TP=2/DP launcher (dp1: GPU via SERVICE_HUB_GPU)
+│   ├── comfyui.sh                  # ComfyUI, port 8189 (GPU via SERVICE_HUB_GPU, stop-ship guard)
 │   └── patch-mtp-quant-config.sh  # Required model patch before SGLang load
 ├── service-hub/         # Web UI: GPU status + one-click profile switching
 │   ├── deploy.sh, stop.sh         # foreground run / stop
@@ -1137,6 +1185,12 @@ ROCm images.
 
 | Date | Issue / Action | Resolution |
 |:---|:---|:---|
+| 2026-10-08 | **ComfyUI native variant removed — the service is docker-only from now on** (user decision: the 2026-10-05 host-process dev variant had become what actually served :8189 — invisible to the Service Hub, whose tiles read "idle" while the box was generating) | Stopped the native process (pid 1853090), then deleted `serve/comfyui-native.sh`, the uv-built venv `/data/work/comfyui/.venv` (~24 GiB), the uv download cache `~/.cache/uv` (~76 GiB, populated by the 2026-10-05 `uv pip install --no-deps` build) and the tmp records (`comfyui-native.log`, `comfyui-native.pid`, `image-freeze-2026-10-05.txt`) — ~100 GiB reclaimed. Kept deliberately: the ComfyUI tree `/data/work/comfyui`, the model set, and the shared warm JIT caches `/data/work/cache/comfyui` (comgr/triton/torchinductor/hf — the container mounts them as `/cache`, `XDG_CACHE_HOME=/cache`). `serve/comfyui.sh`: dropped the native pid-file guard for a generic :8189 exclusivity check (refuse when a non-`comfyui` listener holds the port) and recorded the docker-only variant policy in the header. Service brought back as the docker container (`comfyui-gfx1100:local`, `HIP_VISIBLE_DEVICES=1` → GPU 1) and verified `GET /system_stats` on :8189 from the host and over the LAN URL animlab's api uses (`H3_COMFYUI_URL=http://192.168.50.143:8189`); the Service Hub now attributes the `comfyui` container per-GPU again. Code edits go through `/data/work/comfyui` + container restart; dependency changes rebuild the image via `provision/build-comfyui.sh` — do not reintroduce a host-process launcher. |
+| 2026-10-08 | **Service Hub: every service now states its port as clear text** (a started service left the user guessing where it listens — the port was buried in the args line or the health URL) | `ServiceInfo` gained `port`: the profile's new optional `port:` field, else derived from the health URL (`http://localhost:8080/health_generate` → 8080). UI: a `port 8080` pill next to every service state in the profile card (deliberately loud styling), a clickable link to `http://<host>:<port>/` while the service is running; the activity log names the port both when the start begins ("Starting … — port 8080") and when it completes ("listening on :8080"). Verified against the live hub: `/api/profiles/*` return `port` (sglang 8080 / comfyui 8189, explicit `port:` wins over the URL), the served bundle carries the UI text. Docs: `service-hub/README.md` — "Ports are always shown as text" + `port:` in the profile example. |
+| 2026-10-08 | **Service Hub: single-card services can now be started on a chosen GPU** (before this, `gpu: auto` services always landed on the freest card — the only way to pin a card was editing the profile or hand-running the launcher) | `POST /api/switch/{name}?gpu=<id>` overrides placement for the profile's single-card services (`gpu: auto` or one pinned id; `gpu=1,0` gives one id per single-card service in service order). Multi-card/script-pinned services stay unselectable and answer `400`. Validation (unknown id, bad format, id count vs. selectable services, duplicates) runs **before anything is stopped**, so a typo cannot take a running service down; a pick on a card a coexisting profile already uses is refused `409` naming the occupant (`force=true` overrides that check and nothing else — two model servers on one 24 GB card OOM each other). The check runs after the switch's own conflict stops, so a restart onto the same/another card is never blocked by its own container. `SwitchResult` gained `placements` (`["sglang-single->GPU0"]`). UI: per-profile GPU dropdown next to Start (single-card profiles only) showing free VRAM and per-card occupancy; the activity log echoes the chosen card and returned placement. Verified live through the hub: `sglang-single?gpu=0` → `placements=["sglang-single->GPU0"]`, 58 s to ready (container `sglang-tp2-gpu0`, `HIP_VISIBLE_DEVICES=0`); `comfyui?gpu=0` while GPU 0 busy → 409 with the occupant named, running service untouched; `?gpu=9` / `?gpu=x` / `?gpu=1,0` (count mismatch) / `?gpu=1` on `sglang-tp2` → 400, no side effects; `?gpu=1` moved the service back to card 1. Frontend rebuilt (`vite build` → `static/`). Docs: `service-hub/README.md` "Choosing the GPU". |
+| 2026-10-08 | **Service Hub "start sglang-single" failed: container died after ~13 s with `RuntimeError: No accelerator (CUDA, XPU, HPU, NPU, MUSA, MPS) or platform plugin is available`, and the hub then refused all retries with "Another switch or stop is already in progress" for 30 min** | Two bugs. (1) GPU masking: `serve/sglang-tp2.sh` still exported **both** `ROCR_VISIBLE_DEVICES` and `HIP_VISIBLE_DEVICES` — the dual-mask trap the 2026-10-03 ComfyUI fix documented ("the sglang pattern must not be copied"), never fixed at its source. The two masks compose as stacked filters (ROCR narrows the agent list and renumbers from 0, then HIP indexes into the narrowed list), so `both="1"` selects index 1 of a one-device list → zero GPUs → torch sees nothing → sglang's platform probe raises the accelerator error. The launcher only ever survived because its values were `0`/`0,1` (mask == renumbered index) and dp1 was hardcoded to GPU 0; the new `gpu: auto` placement picked the freest card, GPU 1, and reproduced it deterministically. Measured matrix (identical container otherwise): `ROCR=1+HIP=1` → 0 GPUs (twice), `ROCR=1+HIP=0` → 1, `ROCR=0+HIP=1` → 0, either alone → 1. Fix: export `HIP_VISIBLE_DEVICES` only (same as `serve/comfyui.sh`); keeps host-index semantics for `service_hub/gpu_monitor.py` attribution — verified `HIP=1` allocates on physical card1 (sysfs VRAM) and `HIP=0,1` still yields 2 devices for tp2. (2) Fail-fast: `wait_ready` curled the port for the full 1800 s against a container that had exited seconds after start; since the hub holds its switch lock while the launcher runs, the UI looked wedged. `wait_ready` now checks the container's running state each iteration and bails immediately with `docker logs --tail 40`. Also dropped a duplicated `--model-path` in `serve_args`. Verified end-to-end through the hub on the same placement that failed: `POST /api/switch/sglang-single` → `status=success`, 62 s to ready (container `sglang-tp2-gpu1`, `HIP_VISIBLE_DEVICES=1` only), `/health_generate` 200, `/v1/models` lists the model, chat completion returns correctly. |
+| 2026-10-05 | **ComfyUI switched to a native host process for code editing** (user decision: stop the docker service, keep the container and image untouched for rollback; Service Hub stays docker-only, its tiles/stop buttons track the docker variant only) | Added `serve/comfyui-native.sh` (same CLI `start\|stop\|logs\|status` and same contract as the docker launcher: `COMFYUI_GPU` default 1 with `HIP_VISIBLE_DEVICES` as the only visibility env, caches `/data/work/cache/comfyui`, HF mirror, nofile 262144, TP2 guard, §5 model preflight; PID-file stop/status, log `tmp/comfyui/comfyui-native.log`) plus venv `/data/work/comfyui/.venv` (uv-managed CPython 3.12.15) built with `uv pip install --no-deps` over the image freeze `tmp/comfyui/image-freeze-2026-10-05.txt` (298 pins, `pip freeze` diff vs the image empty) from pypi.org + `rocm.devreleases.amd.com/whl-multi-arch` — no host ROCm, system Python untouched. pip failed twice first: the resolver rejected the whole freeze (`spin 0.18` needs `click<8.4` vs pinned `click==8.5.0` — layered image installs never met) → `--no-deps`; then its keep-alive downloads throttled to ~30–150 kB/s (fresh curl to the same host: 5.4 MB/s) → killed it and let uv re-download in 7m34s. Verified natively: torch sees 1× RX 7900 XTX (gfx1100, 24 GiB) matmul OK; ComfyUI 0.38.2 + torch 2.13.0+rocm7.14.0 serving :8189 in 21 s; 6/6 required node types HTTP 200, 0 `IMPORT FAILED`; Z-Image workflow produced `Z-image_00002_.png` in 54 s (container reference: 39 s). Cosmetic: `rocSHMEM Could not open libnuma` at startup (no libnuma on host, single-GPU unaffected). Both launchers now guard the :8189 exclusivity. Known gap (pre-existing): animlab api container's `.env` `H3_COMFYUI_URL=127.0.0.1:8189` is its own loopback — `http://192.168.50.143:8189` works from both host and container. |
+| 2026-10-05 | **Service Hub now manages ComfyUI and places single-card services by GPU freeness** (ComfyUI was running but invisible to the hub: no profile, and `MANAGED_CONTAINER_PREFIXES = ("sglang-",)` hid its container from per-GPU attribution and from Stop all) | Added `profiles/comfyui.yaml` (`gpu: auto`, conflicts with `sglang-tp2` only) and the `gpu:`/`conflicts:` profile fields; `gpu: auto` services are placed on the GPU with the most free VRAM at start time, started **one after another** with each taking the then-freest unassigned card, exported as `SERVICE_HUB_GPU` (honored by both launchers over their defaults; dp1's container is now `sglang-tp2-gpu<id>` and cleans both name variants). Switching became conflict-aware — it stops only the target's declared conflicts (read symmetrically) instead of everything, so `sglang-single` + `comfyui` coexist from the UI; per-profile `POST /api/profiles/{name}/stop` gives independent toggling, `Stop all` unchanged. All hardcoded `sglang-` prefix scans replaced by profile-derived `container_prefix` values, which also fixed a pre-existing misreport: both SGLang profiles shared prefix `sglang-tp2`, so `sglang-tp2` showed "running" whenever dp1 was up (docker's name filter is a substring match) — prefixes are now `sglang-tp2-tp2` / `sglang-tp2-gpu` / `comfyui`. `/api/current` gained `active_profiles` (live container truth vs. the stale last-switch record). Verified read-only: 3 profiles listed, `active_profiles=[comfyui, sglang-single]`, `assigned_gpus` 1/0, placement dry-run picks 20 GB-free card1 first then card0; containers untouched. |
 | 2026-10-03 | **ComfyUI G1 service deployed on GPU 1** (spec: animlab `COMFYUI_DEPLOY.md`) | Containerized instead of the spec's venv (user decision — no host ROCm, no python3-venv here, every GPU service on this node is Docker already): image `comfyui-gfx1100:local` on `rocm/pytorch` (torch 2.13.0+rocm7.14.0), ComfyUI `v0.38.2` + 4 node packs pinned, launcher `serve/comfyui.sh` (port 8189, `HIP_VISIBLE_DEVICES=1`, caches under `/data/work/cache/comfyui`), 97 GiB of models via `download-comfyui-models.sh`, AMD workflow variants in `config/workflows/`. G1 gates: 33/33 node types, RTX VSR absent, exact §5 loader names, Z-Image success 39 s, H3 success 15:12 @0.4 MP → 294f/12.25 s MP4 **with audio**, peak VRAM 24.56/24.56 GiB, LAN `/system_stats` 2.4–4.6 ms. Full checklist: `tmp/comfyui/G1_REPORT.md`. |
 | 2026-10-03 | **ComfyUI container fd limit raised (nofile 1024 -> 262144)** (animlab Gate G2: MiniMax H3 text encoding hit `EMFILE` on `/proc/meminfo` via ComfyUI pinned-memory/psutil once model mmaps crossed docker's default soft cap; `serve/comfyui.sh` now passes `--ulimit nofile=262144:262144`, comment kept above the `docker run` continuation chain) |
 | 2026-10-03 | **ComfyUI container died instantly: "No CUDA GPUs are available"** | Root cause was the launcher exporting **both** `ROCR_VISIBLE_DEVICES=1` and `HIP_VISIBLE_DEVICES=1` (pattern copied from `sglang-tp2.sh`, which only survives because it passes symmetric values like `0,1`). ROCR first narrows the device list to `[card1]`, then HIP's index 1 is applied to that already-filtered list where index 1 does not exist → zero devices. Fix: export exactly one (`HIP_VISIBLE_DEVICES` alone verified: count=1, matmul OK). The sglang pattern must not be copied. |

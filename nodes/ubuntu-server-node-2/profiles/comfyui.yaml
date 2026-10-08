@@ -1,0 +1,32 @@
+# MiniMax H3 / Z-Image generation service (animlab Gate G1) on a single card.
+#
+# Composable, not exclusive: the only conflict is sglang-tp2 (§2.2 — TP=2 owns
+# both cards, and serve/comfyui.sh refuses to start while `sglang-tp2-tp2`
+# runs). Switching to this profile leaves sglang-single alone, which IS the
+# steady state: LLM on one card, ComfyUI on the other.
+name: comfyui
+description: "MiniMax H3 + Z-Image generation on one GPU, port 8189"
+version: "1.0"
+
+gpu_allocation:
+  - role: image-gen
+    # auto = placed on the GPU with the most free VRAM at start time (the hub
+    # exports SERVICE_HUB_GPU; historically card 1, since card 0 serves the
+    # single-card LLM — but freeness decides, not this file).
+    gpu: auto
+    model: MiniMax-H3-int8 + Z-Image-Turbo
+    note: "single GPU, :8189"
+
+services:
+  - name: comfyui
+    script: serve/comfyui.sh
+    args: ["start", "8189"]
+    gpu: auto
+    health: http://localhost:8189/system_stats
+    container_prefix: comfyui
+
+conflicts:
+  - sglang-tp2
+
+stop_containers:
+  - comfyui

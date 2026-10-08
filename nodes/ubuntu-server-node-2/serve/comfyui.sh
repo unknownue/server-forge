@@ -11,7 +11,10 @@
 # 0.0.0.0 LAN bind with no CORS (§8), logs under the repo tmp/ (§7.4).
 #
 # GPU allocation (§2, hard requirement):
-#   * This launcher pins HIP_VISIBLE_DEVICES=GPU 1 by default.
+#   * Card selection order: SERVICE_HUB_GPU (set by the Service Hub, which
+#     places single-card services on the GPU with the most free VRAM at start
+#     time) > COMFYUI_GPU (manual override) > 1 (default — the historical
+#     steady state keeps card 0 for the single-card LLM).
 #   * PITFALL (found 2026-10-03): exporting BOTH ROCR_VISIBLE_DEVICES=1 and
 #     HIP_VISIBLE_DEVICES=1 masks the device TWICE — ROCR first narrows the list
 #     to [card1], then HIP's index 1 is applied to that already-filtered list
@@ -35,7 +38,15 @@
 #   bash nodes/ubuntu-server-node-2/serve/comfyui.sh status
 #   bash nodes/ubuntu-server-node-2/serve/comfyui.sh start [PORT] [EXTRA_ARGS]
 #
-#   COMFYUI_GPU=0 bash ... start     # override the pinned card (rare; see §2)
+#   COMFYUI_GPU=0 bash ... start     # manual override (rare; see §2)
+#                                     # SERVICE_HUB_GPU, when set by the hub,
+#                                     # wins over this.
+#
+# VARIANT POLICY (2026-10-08): docker is the ONLY way this service runs. The
+# 2026-10-05 native dev variant (serve/comfyui-native.sh + the uv-built venv)
+# was removed on 2026-10-08 (user decision) — do not reintroduce a host-process
+# launcher; ComfyUI/custom-node code edits go through $COMFYUI_HOME plus this
+# container (rebuild the image via provision/build-comfyui.sh when deps change).
 #
 # First start after a machine change:
 #   bash nodes/ubuntu-server-node-2/provision/build-comfyui.sh   # if image missing
@@ -56,7 +67,11 @@ COMFYUI_HOME="${COMFYUI_HOME:-/data/work/comfyui}"
 CACHE_DIR="${COMFYUI_CACHE_DIR:-/data/work/cache/comfyui}"
 IMAGE="${COMFYUI_IMAGE:-comfyui-gfx1100:local}"
 NAME="comfyui"
-GPU="${COMFYUI_GPU:-1}"
+# Service Hub placement wins when set (hub picks the freest card per start);
+# a manual COMFYUI_GPU override applies to hand-run launches; 1 keeps the
+# historical steady state (card 0 = single-card LLM). Exactly ONE visibility
+# env is exported below — see the §2 pitfall in the header.
+GPU="${SERVICE_HUB_GPU:-${COMFYUI_GPU:-1}}"
 LOG_DIR="$REPO_ROOT/tmp/comfyui"
 LOG_FILE="$LOG_DIR/comfyui.log"
 
@@ -64,6 +79,17 @@ log() { echo "[$(date +%H:%M:%S)] $*"; }
 
 preflight() {
     docker info &>/dev/null || { echo "ERROR: Docker not accessible." >&2; exit 1; }
+
+    # :8189 exclusivity (generalized 2026-10-08 from the retired
+    # native-variant guard): refuse instead of letting `docker run` die on a
+    # port-bind error when something other than this launcher's container is
+    # already serving the port.
+    if ! docker ps --format '{{.Names}}' | grep -qx "$NAME" \
+        && ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$PORT$"; then
+        echo "ERROR: something other than the '$NAME' container is listening on :$PORT." >&2
+        exit 1
+    fi
+
     [[ -f "$COMFYUI_HOME/main.py" ]] || {
         echo "ERROR: ComfyUI not found at $COMFYUI_HOME" >&2; exit 1; }
     docker image inspect "$IMAGE" &>/dev/null || {

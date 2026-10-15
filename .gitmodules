@@ -25,3 +25,6 @@
 [submodule "submodules/multica"]
 	path = submodules/multica
 	url = https://github.com/multica-ai/multica.git
+[submodule "submodules/uu-remote-linux"]
+	path = submodules/uu-remote-linux
+	url = https://github.com/VallierDev/uu-remote-linux.git

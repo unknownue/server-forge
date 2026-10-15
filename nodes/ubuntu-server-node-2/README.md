@@ -150,6 +150,26 @@ docker run --rm --device=/dev/kfd --device=/dev/dri \
   rocm/rocm-terminal rocminfo | grep -E 'Name|gfx'
 ```
 
+### 8. Disable automatic software update checks (apt + snap)
+
+This node is a workload machine — automatic apt index refreshes, unattended
+upgrades and snap auto-refreshes are all turned **off** so nothing installs or
+reboots under a running job. Firmware updates (fwupd) are deliberately kept on.
+
+```bash
+sudo bash nodes/ubuntu-server-node-2/config/disable-update-checks.sh            # disable
+sudo bash nodes/ubuntu-server-node-2/config/disable-update-checks.sh status     # read-only report
+sudo bash nodes/ubuntu-server-node-2/config/disable-update-checks.sh enable     # restore Ubuntu defaults
+```
+
+What it touches: the `apt-daily*` and `update-notifier-*` timers, the
+`apt-daily*`/`unattended-upgrades` services (masked), an
+`/etc/apt/apt.conf.d/99disable-auto-updates` override that zeroes all
+`APT::Periodic::*` knobs (so a re-enabled timer is still a no-op),
+`Prompt=never` in `/etc/update-manager/release-upgrades`, and
+`snap refresh --hold`. Updates are then applied **manually** — run
+`sudo apt update && sudo apt upgrade` and `sudo snap refresh` when you choose to.
+
 ## GPU-to-GPU P2P: WORKING after a locally built kernel
 
 Both GPUs sit behind *separate* PCIe root ports in *separate* IOMMU groups — but
@@ -1185,6 +1205,7 @@ ROCm images.
 
 | Date | Issue / Action | Resolution |
 |:---|:---|:---|
+| 2026-10-13 | **Automatic software update detection disabled (apt + snap; fwupd kept)** (user request — this node is a workload machine and should never install or reboot under a running job) | Added `config/disable-update-checks.sh` (idempotent, `disable`/`enable`/`status`). Disables `apt-daily.timer`, `apt-daily-upgrade.timer`, `update-notifier-download.timer`, `update-notifier-motd.timer`; masks `apt-daily.service`, `apt-daily-upgrade.service`, `unattended-upgrades.service`; writes `/etc/apt/apt.conf.d/99disable-auto-updates` zeroing every `APT::Periodic::*` knob (a re-enabled timer stays a no-op); sets `Prompt=never` in `/etc/update-manager/release-upgrades` (no new-release checks); holds snap auto-refresh via `snap refresh --hold`. fwupd firmware metadata refresh left enabled deliberately. Updates become a manual decision: `sudo apt update && sudo apt upgrade`, `sudo snap refresh`. |
 | 2026-10-08 | **ComfyUI native variant removed — the service is docker-only from now on** (user decision: the 2026-10-05 host-process dev variant had become what actually served :8189 — invisible to the Service Hub, whose tiles read "idle" while the box was generating) | Stopped the native process (pid 1853090), then deleted `serve/comfyui-native.sh`, the uv-built venv `/data/work/comfyui/.venv` (~24 GiB), the uv download cache `~/.cache/uv` (~76 GiB, populated by the 2026-10-05 `uv pip install --no-deps` build) and the tmp records (`comfyui-native.log`, `comfyui-native.pid`, `image-freeze-2026-10-05.txt`) — ~100 GiB reclaimed. Kept deliberately: the ComfyUI tree `/data/work/comfyui`, the model set, and the shared warm JIT caches `/data/work/cache/comfyui` (comgr/triton/torchinductor/hf — the container mounts them as `/cache`, `XDG_CACHE_HOME=/cache`). `serve/comfyui.sh`: dropped the native pid-file guard for a generic :8189 exclusivity check (refuse when a non-`comfyui` listener holds the port) and recorded the docker-only variant policy in the header. Service brought back as the docker container (`comfyui-gfx1100:local`, `HIP_VISIBLE_DEVICES=1` → GPU 1) and verified `GET /system_stats` on :8189 from the host and over the LAN URL animlab's api uses (`H3_COMFYUI_URL=http://192.168.50.143:8189`); the Service Hub now attributes the `comfyui` container per-GPU again. Code edits go through `/data/work/comfyui` + container restart; dependency changes rebuild the image via `provision/build-comfyui.sh` — do not reintroduce a host-process launcher. |
 | 2026-10-08 | **Service Hub: every service now states its port as clear text** (a started service left the user guessing where it listens — the port was buried in the args line or the health URL) | `ServiceInfo` gained `port`: the profile's new optional `port:` field, else derived from the health URL (`http://localhost:8080/health_generate` → 8080). UI: a `port 8080` pill next to every service state in the profile card (deliberately loud styling), a clickable link to `http://<host>:<port>/` while the service is running; the activity log names the port both when the start begins ("Starting … — port 8080") and when it completes ("listening on :8080"). Verified against the live hub: `/api/profiles/*` return `port` (sglang 8080 / comfyui 8189, explicit `port:` wins over the URL), the served bundle carries the UI text. Docs: `service-hub/README.md` — "Ports are always shown as text" + `port:` in the profile example. |
 | 2026-10-08 | **Service Hub: single-card services can now be started on a chosen GPU** (before this, `gpu: auto` services always landed on the freest card — the only way to pin a card was editing the profile or hand-running the launcher) | `POST /api/switch/{name}?gpu=<id>` overrides placement for the profile's single-card services (`gpu: auto` or one pinned id; `gpu=1,0` gives one id per single-card service in service order). Multi-card/script-pinned services stay unselectable and answer `400`. Validation (unknown id, bad format, id count vs. selectable services, duplicates) runs **before anything is stopped**, so a typo cannot take a running service down; a pick on a card a coexisting profile already uses is refused `409` naming the occupant (`force=true` overrides that check and nothing else — two model servers on one 24 GB card OOM each other). The check runs after the switch's own conflict stops, so a restart onto the same/another card is never blocked by its own container. `SwitchResult` gained `placements` (`["sglang-single->GPU0"]`). UI: per-profile GPU dropdown next to Start (single-card profiles only) showing free VRAM and per-card occupancy; the activity log echoes the chosen card and returned placement. Verified live through the hub: `sglang-single?gpu=0` → `placements=["sglang-single->GPU0"]`, 58 s to ready (container `sglang-tp2-gpu0`, `HIP_VISIBLE_DEVICES=0`); `comfyui?gpu=0` while GPU 0 busy → 409 with the occupant named, running service untouched; `?gpu=9` / `?gpu=x` / `?gpu=1,0` (count mismatch) / `?gpu=1` on `sglang-tp2` → 400, no side effects; `?gpu=1` moved the service back to card 1. Frontend rebuilt (`vite build` → `static/`). Docs: `service-hub/README.md` "Choosing the GPU". |
